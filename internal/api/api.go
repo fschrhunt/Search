@@ -85,6 +85,19 @@ func (s *Server) authorized(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(s.opt.Token)) == 1
 }
 
+// RequireAuth wraps any handler with the same bearer check the JSON API uses, so
+// the MCP endpoint cannot be reached unauthenticated.
+func (s *Server) RequireAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorized(r) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="search"`)
+			s.fail(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // search handles GET /v1/search.
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
