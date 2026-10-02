@@ -10,7 +10,7 @@ mod cache;
 mod extract;
 mod guard;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::config::FetchSettings;
 use crate::index::{self, Store};
@@ -73,17 +73,22 @@ pub struct Fetcher {
 }
 
 impl Fetcher {
-    /// Build the fetcher. The client never reuses a default transport: the
-    /// resolver pre-check lives in `guard`, and redirects are re-validated per
-    /// hop rather than being followed blindly.
+    /// Build the fetcher. The client reuses no default transport: a
+    /// [`guard::GuardedResolver`] vets every address at connect time, and
+    /// redirects are re-validated per hop by the policy below.
     pub fn new(settings: FetchSettings, store: std::sync::Arc<Store>, user_agent: &str) -> Self {
+        let redirects = settings.max_redirects.max(1);
         let client = reqwest::Client::builder()
             .user_agent(user_agent.to_string())
             .timeout(settings.timeout())
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                // Stop after the configured number of hops; each hop's host was
-                // already checked by `guard::host_allowed` before the request.
-                if attempt.previous().len() >= attempt_limit() {
+            .connect_timeout(Duration::from_secs(8))
+            // The resolver is the trust boundary: it refuses a private address
+            // even if a name's answer changed since `check_host` ran.
+            .dns_resolver(std::sync::Arc::new(guard::GuardedResolver::new(
+                settings.allow_private,
+            )))
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() >= redirects {
                     attempt.error("too many redirects")
                 } else {
                     attempt.follow()
@@ -123,7 +128,6 @@ impl Fetcher {
             .await
             .map_err(|_| FetchError::Network("fetcher is shutting down".into()))?;
 
-        let started = Instant::now();
         let response = self
             .client
             .get(parsed.clone())
@@ -179,7 +183,6 @@ impl Fetcher {
             error: None,
         };
         self.cache.put(raw, &fetched);
-        let _ = started;
         Ok(fetched)
     }
 
@@ -211,12 +214,6 @@ impl Fetcher {
     }
 }
 
-/// The redirect limit, read once. A `Policy::custom` closure cannot borrow the
-/// fetcher, so the limit is carried here for the one client it configures.
-fn attempt_limit() -> usize {
-    crate::config::FetchSettings::default().max_redirects
-}
-
 /// Read a response body up to `max` bytes, reporting whether more remained.
 async fn read_capped(response: reqwest::Response, max: u64) -> Result<(String, bool), String> {
     use futures::StreamExt;
@@ -238,7 +235,18 @@ async fn read_capped(response: reqwest::Response, max: u64) -> Result<(String, b
 }
 
 /// Turn a transport error into a concise message that does not leak the URL.
+/// A resolver refusal — the SSRF guard catching a name that resolves inside the
+/// network — is preserved, because that is a deliberate refusal, not a failure.
 fn classify(error: &reqwest::Error) -> String {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    for _ in 0..6 {
+        let Some(current) = source else { break };
+        let text = current.to_string();
+        if text.contains("refusing") || text.contains("resolves to private") {
+            return text;
+        }
+        source = current.source();
+    }
     if error.is_timeout() {
         "request timed out".into()
     } else if error.is_connect() {

@@ -64,9 +64,15 @@ pub async fn serve(
     0
 }
 
-/// Build the router. The auth layer wraps every route, MCP included.
+/// Build the router. The auth layer wraps every route, MCP included. The token
+/// is resolved once here, so a per-request check never reads the environment.
 fn router(service: Arc<Service>) -> Router {
-    let mcp = mcp::mount(Arc::clone(&service));
+    let allowed_host = service.config().addr.clone();
+    let mcp = mcp::mount(Arc::clone(&service), &allowed_host);
+    let token = service.config().resolved_token().unwrap_or_default();
+    let guard = AuthGuard {
+        expected: Arc::new(token),
+    };
     Router::new()
         .route("/healthz", get(health))
         .route("/v1/status", get(status))
@@ -76,32 +82,34 @@ fn router(service: Arc<Service>) -> Router {
         // The MCP endpoint is nested so its own paths stay under /mcp, and it
         // sits inside the same auth layer as everything else.
         .nest_service("/mcp", mcp)
-        .layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&service),
-            auth,
-        ))
+        .layer(axum::middleware::from_fn_with_state(guard, auth))
         .with_state(service)
+}
+
+/// The resolved token the auth layer compares against, held once per server.
+#[derive(Clone)]
+struct AuthGuard {
+    expected: Arc<String>,
 }
 
 /// Reject any request without the configured bearer token, in constant time.
 async fn auth(
-    State(service): State<Arc<Service>>,
+    State(guard): State<AuthGuard>,
     headers: HeaderMap,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let expected = match service.config().resolved_token() {
-        Some(token) => token,
-        // A server with no token denies everything.
-        None => return unauthorized(),
-    };
+    // A server with no token denies everything.
+    if guard.expected.is_empty() {
+        return unauthorized();
+    }
     let presented = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::trim)
         .unwrap_or("");
-    if !constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+    if !constant_time_eq(presented.as_bytes(), guard.expected.as_bytes()) {
         return unauthorized();
     }
     next.run(request).await

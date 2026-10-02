@@ -4,11 +4,12 @@
 //! classifies an address as private when it can reach infrastructure — loopback,
 //! RFC1918, link-local (including cloud metadata), CGNAT, multicast, unique
 //! local, and every IPv6 form that embeds such an IPv4 (NAT64, 6to4, and
-//! IPv4-compatible). Name-based hosts are checked by name, and the fetcher's own
-//! transport resolves and re-checks before dialing, so a name that resolves
-//! inside the network is refused too.
+//! IPv4-compatible). Name-based hosts are checked by name, and a custom
+//! reqwest resolver re-checks every address at connect time, so a name that
+//! resolves inside the network — or a DNS answer that changes between the check
+//! and the dial (rebinding) — is refused before a socket is opened.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// Why a host was refused.
 #[derive(Debug, Clone)]
@@ -37,6 +38,9 @@ const LOCAL_SUFFIXES: &[&str] = &[".localhost", ".local", ".internal", ".home.ar
 /// `url::Url::host_str()` returns a bracketed IPv6 literal (`[::1]`), so the
 /// brackets are stripped before the address is parsed — otherwise a bracketed
 /// loopback or NAT64 literal would fall through the name checks and be dialed.
+///
+/// This checks the literal the URL names. A hostname is only fully vetted when
+/// [`GuardedResolver`] resolves it, which the fetcher installs on its client.
 pub fn check_host(host: &str, allow_private: bool) -> Result<(), GuardError> {
     if allow_private {
         return Ok(());
@@ -58,6 +62,68 @@ pub fn check_host(host: &str, allow_private: bool) -> Result<(), GuardError> {
         }
     }
     Ok(())
+}
+
+/// The addresses a name may dial: those that are public. Returns an error
+/// naming the offending address when any answer is private, so a split answer
+/// cannot hide an internal address behind a public one.
+pub fn allowed_addresses(
+    name: &str,
+    addresses: impl IntoIterator<Item = IpAddr>,
+    allow_private: bool,
+) -> Result<Vec<SocketAddr>, GuardError> {
+    let mut allowed = Vec::new();
+    let mut any = false;
+    for ip in addresses {
+        any = true;
+        if !allow_private && !is_public_ip(ip) {
+            return Err(GuardError(format!(
+                "refusing {name}: resolves to private {ip}"
+            )));
+        }
+        allowed.push(SocketAddr::new(ip, 0));
+    }
+    if !any {
+        return Err(GuardError(format!("resolve {name}: no addresses")));
+    }
+    Ok(allowed)
+}
+
+/// A reqwest resolver that enforces the guard at connect time. This is what
+/// closes DNS rebinding: the address the socket is opened to is the one that
+/// passed [`allowed_addresses`], never a fresh, unchecked resolution.
+pub struct GuardedResolver {
+    allow_private: bool,
+}
+
+impl GuardedResolver {
+    pub fn new(allow_private: bool) -> Self {
+        GuardedResolver { allow_private }
+    }
+}
+
+impl reqwest::dns::Resolve for GuardedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let allow_private = self.allow_private;
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            // The system resolver is the trust root; we only filter its answers.
+            let resolved = tokio::net::lookup_host((host.as_str(), 0)).await;
+            let addresses: Vec<IpAddr> = match resolved {
+                Ok(addresses) => addresses.map(|addr| addr.ip()).collect(),
+                Err(error) => {
+                    return Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+                }
+            };
+            match allowed_addresses(&host, addresses, allow_private) {
+                Ok(allowed) => {
+                    let iter: reqwest::dns::Addrs = Box::new(allowed.into_iter());
+                    Ok(iter)
+                }
+                Err(error) => Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>),
+            }
+        })
+    }
 }
 
 /// Whether an address is routable on the public internet. `false` means the
@@ -248,5 +314,25 @@ mod tests {
     fn allow_private_disables_the_guard_only_when_asked() {
         assert!(check_host("127.0.0.1", true).is_ok());
         assert!(check_host("localhost", true).is_ok());
+    }
+
+    /// The resolver-level check is what closes rebinding: a name that resolves
+    /// to a private address must be refused even though its literal is public.
+    #[test]
+    fn a_name_resolving_private_is_refused() {
+        use std::net::IpAddr;
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let public: IpAddr = "93.184.216.34".parse().unwrap();
+        // A split answer is refused, not partially allowed.
+        assert!(allowed_addresses("evil.example", [public, loopback], false).is_err());
+        assert_eq!(
+            allowed_addresses("ok.example", [public], false)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(allowed_addresses("anything", [], false).is_err());
+        // The escape hatch used only by tests and mirrors.
+        assert!(allowed_addresses("evil.example", [loopback], true).is_ok());
     }
 }
