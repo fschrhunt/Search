@@ -55,12 +55,24 @@ timed out, or failed.
 
 ## The MCP tools
 
-- **`web_search`** takes one to five queries, an optional objective, a result
-  limit, and an optional provider list. It returns ranked results with title,
-  URL, and snippet.
-- **`web_fetch`** takes one to ten URLs and an optional objective. It returns
-  each page as clean text and adds it to the private index. Private and
-  link-local addresses are refused.
+- **`web_search`** takes one to five queries, a result limit, and an optional
+  provider list. It returns ranked results with title, URL, and snippet. Every
+  answer reports, per provider, whether it answered, timed out, or failed.
+- **`web_fetch`** takes one to ten URLs. With a `query`, it returns only the
+  passages that match — the cheap way to read a page, and almost always what you
+  want. With `max_characters` it bounds the answer. Without a query it returns
+  the page's clean text.
+
+Reading is safe to repeat: a page fetched once is stored in the index and served
+from there on a re-read. Private and link-local addresses are refused.
+
+## What "clean" means
+
+Extraction keeps the article and drops the cruft: ads, cookie banners, related
+rails, comment sections, and visually hidden text. Links are reduced to their
+text and images to their alt text, so a fetched page cannot carry a URL that a
+client would fetch on the model's behalf. A page that exists only to redirect
+elsewhere is followed to its target.
 
 ## The private corpus
 

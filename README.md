@@ -13,9 +13,12 @@ a tailnet. There are no accounts, no usage quotas, and no telemetry.
 - **One static binary.** Rust, no system dependencies, SQLite compiled in.
 - **Keyless by default.** Works out of the box against providers that need no
   API key.
-- **Agent-shaped output.** Every response reports, per provider, whether it
+- **Clean reads.** Extraction keeps the article and drops ads, banners, related
+  rails, and hidden text, so a model reads prose, not cruft. Links are
+  neutralized so a fetched page cannot carry an exfiltration URL.
+- **Agent-shaped output.** Every search reports, per provider, whether it
   answered, timed out, or failed, so an empty result is never mistaken for a
-  broken one.
+  broken one. `web_fetch` with a query returns only the passages that match.
 - **A private corpus that grows from use.** Every page `fetch` reads is stored
   and full-text indexed. Repeated reading is instant and independent of any
   upstream provider.
