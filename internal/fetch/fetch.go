@@ -268,33 +268,64 @@ func (f *Fetcher) resolvePublic(ctx context.Context, host string) (net.IP, error
 
 // isPrivate reports whether an address is not routable on the public internet:
 // loopback, RFC1918, link-local (including cloud metadata), CGNAT, multicast,
-// unspecified, and their IPv6 equivalents.
+// unspecified, documentation, and every IPv6 form that embeds an IPv4 address
+// (NAT64, 6to4, IPv4-compatible), so a v6 literal cannot tunnel to a blocked v4.
 func isPrivate(ip net.IP) bool {
 	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
 		ip.IsMulticast() || ip.IsUnspecified() || ip.IsPrivate() {
 		return true
 	}
 	if v4 := ip.To4(); v4 != nil {
+		return isPrivateV4(v4)
+	}
+	// IPv6: reject transition and documentation ranges that embed or stand in
+	// for IPv4, and any address whose low 32 bits decode to a blocked IPv4.
+	if len(ip) == net.IPv6len {
 		switch {
-		case v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127: // 100.64/10 CGNAT
+		case ip[0] == 0x00 && ip[1] == 0x64 && ip[2] == 0xff && ip[3] == 0x9b: // 64:ff9b::/96 NAT64
+			return isPrivateV4(net.IPv4(ip[12], ip[13], ip[14], ip[15]))
+		case ip[0] == 0x20 && ip[1] == 0x02: // 2002::/16 6to4
+			return isPrivateV4(net.IPv4(ip[2], ip[3], ip[4], ip[5]))
+		case ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x00 && ip[3] == 0x00: // 2001::/32 Teredo
 			return true
-		case v4[0] == 192 && v4[1] == 0 && v4[2] == 0: // 192.0.0/24
-			return true
-		case v4[0] == 192 && v4[1] == 0 && v4[2] == 2: // TEST-NET-1
-			return true
-		case v4[0] == 198 && (v4[1] == 18 || v4[1] == 19): // benchmarking
-			return true
-		case v4[0] == 198 && v4[1] == 51 && v4[2] == 100: // TEST-NET-2
-			return true
-		case v4[0] == 203 && v4[1] == 0 && v4[2] == 113: // TEST-NET-3
-			return true
-		case v4[0] >= 240: // reserved
+		case ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x0d && ip[3] == 0xb8: // 2001:db8::/32 documentation
 			return true
 		}
-		return false
+		// IPv4-compatible ::/96 (the first 96 bits are zero) embeds the v4 in the last 32.
+		allZero := true
+		for i := 0; i < 12; i++ {
+			if ip[i] != 0 {
+				allZero = false
+				break
+			}
+		}
+		if allZero && (ip[12] != 0 || ip[13] != 0 || ip[14] != 0 || ip[15] != 0) {
+			return isPrivateV4(net.IPv4(ip[12], ip[13], ip[14], ip[15]))
+		}
 	}
-	// IPv6 unique-local and IPv4-mapped handled by IsPrivate/To4 above.
-	if len(ip) == net.IPv6len && ip[0] == 0xfc || (len(ip) == net.IPv6len && ip[0] == 0xfd) {
+	return false
+}
+
+// isPrivateV4 classifies a 4-byte address.
+func isPrivateV4(v4 net.IP) bool {
+	if v4.IsLoopback() || v4.IsLinkLocalUnicast() || v4.IsLinkLocalMulticast() ||
+		v4.IsMulticast() || v4.IsUnspecified() || v4.IsPrivate() {
+		return true
+	}
+	switch {
+	case v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127: // 100.64/10 CGNAT
+		return true
+	case v4[0] == 192 && v4[1] == 0 && v4[2] == 0: // 192.0.0/24
+		return true
+	case v4[0] == 192 && v4[1] == 0 && v4[2] == 2: // TEST-NET-1
+		return true
+	case v4[0] == 198 && (v4[1] == 18 || v4[1] == 19): // benchmarking
+		return true
+	case v4[0] == 198 && v4[1] == 51 && v4[2] == 100: // TEST-NET-2
+		return true
+	case v4[0] == 203 && v4[1] == 0 && v4[2] == 113: // TEST-NET-3
+		return true
+	case v4[0] >= 240: // reserved
 		return true
 	}
 	return false

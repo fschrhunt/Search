@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,13 +188,26 @@ func (c *Config) EngineCfg() *EngineConfig {
 	return &c.Engines
 }
 
+// Validate checks the effective settings. It is exported so callers that change
+// the address after Load can re-check before binding.
+func (c *Config) Validate() error { return c.validate() }
+
 // validate rejects settings that would be unsafe or nonsensical.
 func (c *Config) validate() error {
-	host := c.Addr
-	if i := strings.LastIndex(host, ":"); i >= 0 {
-		host = host[:i]
+	host, _, err := net.SplitHostPort(c.Addr)
+	if err != nil {
+		return fmt.Errorf("addr %q is not host:port", c.Addr)
 	}
-	loopback := host == "" || host == "127.0.0.1" || host == "localhost" || host == "::1"
+	loopback := false
+	switch host {
+	case "", "localhost":
+		// The empty host means all interfaces (":8642"), which is NOT loopback.
+		loopback = host == "localhost"
+	default:
+		if ip := net.ParseIP(host); ip != nil {
+			loopback = ip.IsLoopback()
+		}
+	}
 	if !loopback && c.Token == "" {
 		return fmt.Errorf("addr %q is not loopback; a token is required", c.Addr)
 	}

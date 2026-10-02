@@ -131,6 +131,10 @@ func (s *Server) indexSearch(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusBadRequest, "missing query parameter q")
 		return
 	}
+	if len(q) > 512 {
+		s.fail(w, http.StatusBadRequest, "query too long")
+		return
+	}
 	limit := intParam(r, "limit", 10, 1, 50)
 	hits, err := s.opt.Index.Search(q, limit)
 	if err != nil {

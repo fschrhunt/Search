@@ -156,6 +156,12 @@ func serveHTTP(args []string) int {
 	if *dataDir != "" {
 		c.cfg.DataDir = *dataDir
 	}
+	// Overrides bypassed validation at load time, so validate the effective
+	// settings before binding.
+	if err := c.cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "search: %v\n", err)
+		return 1
+	}
 
 	mcpServer := mcp.New(mcp.Deps{Searcher: c.search, Fetcher: c.fetch, Index: c.store, Version: version})
 	mcpHandler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server { return mcpServer }, nil)
