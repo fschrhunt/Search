@@ -1,0 +1,252 @@
+//! The SSRF guard: decide whether a host may be contacted.
+//!
+//! Because URLs are model-chosen, this is the security-critical file. It
+//! classifies an address as private when it can reach infrastructure — loopback,
+//! RFC1918, link-local (including cloud metadata), CGNAT, multicast, unique
+//! local, and every IPv6 form that embeds such an IPv4 (NAT64, 6to4, and
+//! IPv4-compatible). Name-based hosts are checked by name, and the fetcher's own
+//! transport resolves and re-checks before dialing, so a name that resolves
+//! inside the network is refused too.
+
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+/// Why a host was refused.
+#[derive(Debug, Clone)]
+pub struct GuardError(String);
+
+impl GuardError {
+    pub fn message(&self) -> String {
+        self.0.clone()
+    }
+}
+
+impl std::fmt::Display for GuardError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for GuardError {}
+
+/// Hostnames that are local by name and must never be dialed.
+const LOCAL_SUFFIXES: &[&str] = &[".localhost", ".local", ".internal", ".home.arpa"];
+
+/// Refuse a host that is local by name or by address. `allow_private` disables
+/// the check only for tests and air-gapped mirrors; it is never the default.
+///
+/// `url::Url::host_str()` returns a bracketed IPv6 literal (`[::1]`), so the
+/// brackets are stripped before the address is parsed — otherwise a bracketed
+/// loopback or NAT64 literal would fall through the name checks and be dialed.
+pub fn check_host(host: &str, allow_private: bool) -> Result<(), GuardError> {
+    if allow_private {
+        return Ok(());
+    }
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return Err(GuardError("empty host".into()));
+    }
+    if host == "localhost" || host == "metadata.google.internal" {
+        return Err(GuardError(format!("refusing local host {host:?}")));
+    }
+    if LOCAL_SUFFIXES.iter().any(|suffix| host.ends_with(suffix)) {
+        return Err(GuardError(format!("refusing local host {host:?}")));
+    }
+    let literal = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = literal.parse::<IpAddr>() {
+        if !is_public_ip(ip) {
+            return Err(GuardError(format!("refusing private address {ip}")));
+        }
+    }
+    Ok(())
+}
+
+/// Whether an address is routable on the public internet. `false` means the
+/// fetcher must refuse it.
+pub fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_public_v4(v4),
+        IpAddr::V6(v6) => is_public_v6(v6),
+    }
+}
+
+/// IPv4 classification. Standard: loopback, private, link-local, unspecified,
+/// multicast; plus CGNAT, the TEST-NET blocks, benchmarking, and reserved.
+fn is_public_v4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    if ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+    {
+        return false;
+    }
+    !matches!(
+        (a, b, c),
+        // 100.64/10 carrier-grade NAT
+        (100, 64..=127, _)
+        // 192.0.0/24
+        | (192, 0, 0)
+        // 198.18/15 benchmarking, 198.51.100/24 TEST-NET-2, 203.0.113/24 TEST-NET-3
+        | (198, 18..=19, _)
+        | (198, 51, 100)
+        | (203, 0, 113)
+        // 240/4 reserved
+        | (240..=255, _, _)
+    )
+}
+
+/// IPv6 classification, including the transition forms that embed an IPv4.
+fn is_public_v6(ip: Ipv6Addr) -> bool {
+    if ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || is_unique_local(&ip)
+        || is_unicast_link_local(&ip)
+    {
+        return false;
+    }
+    // IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d): classify the
+    // embedded IPv4 directly. `to_ipv4` handles the mapped form; the compatible
+    // form is caught by inspecting the low 32 bits when the high 96 are zero.
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_public_v4(v4);
+    }
+    let segments = ip.segments();
+    if segments[..6].iter().all(|&s| s == 0) {
+        let embedded = Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            segments[6] as u8,
+            (segments[7] >> 8) as u8,
+            segments[7] as u8,
+        );
+        if embedded != Ipv4Addr::UNSPECIFIED {
+            return is_public_v4(embedded);
+        }
+    }
+    // NAT64 well-known prefix 64:ff9b::/96 embeds the IPv4 in the last 32 bits.
+    if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2..6].iter().all(|&s| s == 0) {
+        let embedded = Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            segments[6] as u8,
+            (segments[7] >> 8) as u8,
+            segments[7] as u8,
+        );
+        return is_public_v4(embedded);
+    }
+    // 6to4 2002::/16 embeds the IPv4 in the next 32 bits.
+    if segments[0] == 0x2002 {
+        let embedded = Ipv4Addr::new(
+            (segments[1] >> 8) as u8,
+            segments[1] as u8,
+            (segments[2] >> 8) as u8,
+            segments[2] as u8,
+        );
+        return is_public_v4(embedded);
+    }
+    match segments[0] {
+        // 2001::/32 Teredo and 2001:db8::/32 documentation
+        0x2001 if segments[1] == 0x0000 || segments[1] == 0x0db8 => false,
+        // 2001:2::/48 benchmarking
+        0x2001 if segments[1] == 0x0002 => false,
+        _ => true,
+    }
+}
+
+/// fc00::/7 unique local addresses.
+fn is_unique_local(ip: &Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xfe00) == 0xfc00
+}
+
+/// fe80::/10 link-local unicast addresses.
+fn is_unicast_link_local(ip: &Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xffc0) == 0xfe80
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().expect("test address")
+    }
+
+    /// Every way an address can reach infrastructure must be classified private.
+    #[test]
+    fn private_addresses_are_refused() {
+        let private = [
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.5.4",
+            "192.168.1.1",
+            "169.254.169.254", // cloud metadata
+            "100.64.0.1",      // CGNAT
+            "0.0.0.0",
+            "::1",
+            "fc00::1",
+            "fe80::1",
+            // IPv6 forms that embed a blocked IPv4.
+            "64:ff9b::7f00:1",    // NAT64 -> 127.0.0.1
+            "64:ff9b::a9fe:a9fe", // NAT64 -> 169.254.169.254
+            "64:ff9b::6440:1",    // NAT64 -> 100.64.0.1 (CGNAT)
+            "64:ff9b::cb00:7105", // NAT64 -> 203.0.113.5 (TEST-NET-3)
+            "2002:7f00:1::",      // 6to4 -> 127.0.0.1
+            "2002:a9fe:a9fe::",   // 6to4 -> 169.254.169.254
+            "2002:6440:1::",      // 6to4 -> 100.64.0.1 (CGNAT)
+            "2002:cb00:7105::",   // 6to4 -> 203.0.113.5 (TEST-NET-3)
+            "::ffff:127.0.0.1",   // IPv4-mapped loopback
+            "::127.0.0.1",        // IPv4-compatible
+            "2001::1",            // Teredo
+            "2001:db8::1",        // documentation
+        ];
+        for address in private {
+            assert!(!is_public_ip(ip(address)), "{address} should be private");
+        }
+    }
+
+    #[test]
+    fn public_addresses_are_allowed() {
+        let public = [
+            "1.1.1.1",
+            "8.8.8.8",
+            "93.184.216.34",
+            "142.250.72.14",
+            "2606:4700:4700::1111",
+            "2606:4700::6810:85e5",
+            "::ffff:8.8.8.8",
+        ];
+        for address in public {
+            assert!(is_public_ip(ip(address)), "{address} should be public");
+        }
+    }
+
+    #[test]
+    fn local_names_are_refused() {
+        for host in [
+            "localhost",
+            "foo.local",
+            "x.internal",
+            "metadata.google.internal",
+            "127.0.0.1",
+            "10.0.0.1",
+            "localhost.",
+            // Bracketed literals as `url::Url::host_str` returns them.
+            "[::1]",
+            "[::ffff:127.0.0.1]",
+            "[64:ff9b::a9fe:a9fe]",
+            "[2002:7f00:1::]",
+        ] {
+            assert!(check_host(host, false).is_err(), "{host} should be refused");
+        }
+        assert!(check_host("example.com", false).is_ok());
+        assert!(check_host("[2606:4700:4700::1111]", false).is_ok());
+    }
+
+    #[test]
+    fn allow_private_disables_the_guard_only_when_asked() {
+        assert!(check_host("127.0.0.1", true).is_ok());
+        assert!(check_host("localhost", true).is_ok());
+    }
+}

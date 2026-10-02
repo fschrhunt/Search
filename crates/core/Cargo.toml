@@ -1,0 +1,27 @@
+[package]
+name = "search-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "The search engine: multi-provider discovery, a hardened fetcher, a private index, and the MCP surface"
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+url.workspace = true
+regex.workspace = true
+uuid.workspace = true
+percent-encoding.workspace = true
+sha2.workspace = true
+rmcp.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

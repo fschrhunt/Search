@@ -1,0 +1,31 @@
+[package]
+# The command and Rust library share the product name.
+name = "search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Self-hosted, agent-first web search: one binary serving discovery, a hardened fetcher, and a private index"
+publish = false
+
+[lib]
+name = "search"
+path = "src/lib.rs"
+
+[[bin]]
+name = "search"
+path = "src/main.rs"
+
+[dependencies]
+search-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal", "io-std", "net"] }
+axum.workspace = true
+rmcp.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
