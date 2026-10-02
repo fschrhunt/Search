@@ -7,14 +7,16 @@ Instructions for an agent editing this repo.
 ```sh
 ./x build          # fast dev build
 ./x test           # the whole behavioral contract
-./x check          # format, lint, tests, and the security-surface guard
+./x check          # format, lint, tests, shell syntax, and the security-surface guard
+./x shell          # shell-script syntax alone
 ./x guard          # the security-surface audit alone
 ./x serve          # the JSON API and MCP over HTTP (dev build)
 ./x stdio          # MCP over stdio (what an agent spawns)
 ```
 
 `./x check` is not optional. It runs `cargo fmt --check`, `cargo clippy -D
-warnings`, the workspace tests, and `scripts/guard.sh`.
+warnings`, the workspace tests, a syntax check of every shell script, and
+`scripts/guard.sh`.
 
 ## Where things live
 
@@ -48,6 +50,9 @@ crates/cli/   the `search` binary
   mcp.rs        the streamable HTTP MCP transport
 scripts/guard.sh  the security-surface audit: allowed hosts, panic-site policy,
                   the SSRF guard's presence, and the auth layer
+scripts/release.sh · scripts/formula.sh · install.sh  the release path; the
+                  tag workflow in .github/workflows/release.yml runs them
+docs/          docs/: user pages, and docs/contributing/ for working on search
 x             the one repository entry point
 ```
 

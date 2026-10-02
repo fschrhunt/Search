@@ -1,0 +1,130 @@
+name: Release
+
+# A tag vX.Y.Z on main releases search: the same checks as CI, archives for macOS
+# and Linux with checksums and build provenance, notes from CHANGELOG.md, the
+# Homebrew formula on main, and a real install of the release on both systems.
+# scripts/release.sh makes the tag.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # stable
+        with:
+          toolchain: 1.98.0
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: The tag is on main and has notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$TAG is not on main" >&2; exit 1; }
+          grep -q "^## $TAG " CHANGELOG.md || { echo "CHANGELOG.md has no ## $TAG section" >&2; exit 1; }
+      - run: ./x check
+
+  release:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # stable
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Build archives and checksums
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          for os in linux darwin; do
+            for arch in amd64 arm64; do
+              target="search_${TAG}_${os}_${arch}"
+              case "$os-$arch" in
+                linux-amd64) triple=x86_64-unknown-linux-gnu ;;
+                linux-arm64) triple=aarch64-unknown-linux-gnu ;;
+                darwin-amd64) triple=x86_64-apple-darwin ;;
+                darwin-arm64) triple=aarch64-apple-darwin ;;
+              esac
+              mkdir -p "dist/$target"
+              rustup target add "$triple"
+              SEARCH_BUILD_VERSION="$TAG" SEARCH_BUILD_CHANNEL=release SEARCH_BUILD_COMMIT="$GITHUB_SHA" \
+                cargo build --release --locked --target "$triple" -p search
+              cp "target/$triple/release/search" "dist/$target/search"
+              cp LICENSE "dist/$target/"
+              tar -C "dist/$target" -czf "dist/$target.tar.gz" search LICENSE
+              rm -r "dist/$target"
+            done
+          done
+          (cd dist && sha256sum *.tar.gz > checksums.txt)
+      # Proves each archive was built here, from this tag: gh attestation verify FILE -R fschrhunt/search
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        # The notes are the tag's section of CHANGELOG.md, from its heading to the next.
+        run: |
+          awk -v tag="$TAG" '/^## /{on = index($0, "## " tag " ") == 1; next} on' CHANGELOG.md > notes.md
+          test -s notes.md
+          gh release create "$TAG" dist/*.tar.gz dist/checksums.txt --verify-tag --title "$TAG" --notes-file notes.md
+
+  # The one job that writes to main: its deploy key, in the release environment
+  # (v* tags only), is the only actor main's ruleset lets past. Everything else
+  # here only reads.
+  formula:
+    needs: release
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
+      - name: Point the Homebrew formula at the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p checksums.txt -O "$RUNNER_TEMP/checksums.txt"
+          scripts/formula.sh "$TAG" "$RUNNER_TEMP/checksums.txt" > search.rb
+          git add search.rb
+          git diff --cached --quiet && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -qam "brew: search $TAG"
+          git push origin HEAD:main
+
+  install:
+    needs: release
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install the release as people will
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          sh install.sh --version "$TAG" --dir "$RUNNER_TEMP/search"
+          test "$("$RUNNER_TEMP/search/search" --version)" = "$TAG"

@@ -1,0 +1,14 @@
+name: Feature
+description: Suggest a change. Smallness is the point, so say what it replaces or simplifies.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do that search does not allow?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you change?
