@@ -306,8 +306,15 @@ func isPrivate(ip net.IP) bool {
 	return false
 }
 
-// isPrivateV4 classifies a 4-byte address.
+// isPrivateV4 classifies a 4-byte address. It normalizes its input, because
+// net.IPv4 returns a 16-byte v4-in-v6 form whose indices would otherwise read
+// as zeros and miss every range below.
 func isPrivateV4(v4 net.IP) bool {
+	t := v4.To4()
+	if t == nil {
+		return true // not an IPv4 address at all: refuse it
+	}
+	v4 = t
 	if v4.IsLoopback() || v4.IsLinkLocalUnicast() || v4.IsLinkLocalMulticast() ||
 		v4.IsMulticast() || v4.IsUnspecified() || v4.IsPrivate() {
 		return true
