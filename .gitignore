@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Local data and scratch
+/data/
+*.db
+*.db-shm
+*.db-wal
