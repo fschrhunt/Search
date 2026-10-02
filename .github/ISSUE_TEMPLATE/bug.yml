@@ -1,0 +1,29 @@
+name: Bug
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce it
+      description: The command, the query, or the URL, and what the service did.
+      render: sh
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `search --version` and `curl /v1/status`
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Operating system and how you run search

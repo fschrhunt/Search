@@ -5,7 +5,7 @@ set -eu
 cd "$(dirname "$0")"
 
 usage() {
-    echo "usage: ./x [build|fmt|lint|test|check|guard|serve|stdio] [args...]" >&2
+    echo "usage: ./x [build|fmt|lint|test|check|guard|shell|serve|stdio] [args...]" >&2
     exit 2
 }
 
@@ -32,16 +32,25 @@ case "$command" in
         cargo test --locked --workspace "$@"
         ;;
     check)
+        [ "$#" -eq 0 ] || usage
         ./x fmt --check
         ./x lint
         ./x test
+        ./x shell
         ./x guard
         ;;
     guard)
         sh scripts/guard.sh
         ;;
+    # The shell scripts the release runs: a syntax error here fails a release,
+    # not a pull request, so it belongs in check.
+    shell)
+        for script in x install.sh scripts/*.sh; do
+            sh -n "$script"
+        done
+        echo "shell: ok"
+        ;;
     serve)
-        shift_ok=${1:-}
         cargo build --locked
         exec ./target/debug/search serve "$@"
         ;;
