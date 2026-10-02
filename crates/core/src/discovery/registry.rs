@@ -12,7 +12,7 @@ use tokio::task::JoinSet;
 
 use super::{
     default_providers, FailureCause, Finding, Provider, ProviderError, ProviderState,
-    ProviderStatus, Query, Response,
+    ProviderStatus, Query, Ranked, Response,
 };
 use crate::config::{EngineSettings, SearchSettings};
 
@@ -64,7 +64,7 @@ impl Registry {
         let selected: Vec<Arc<dyn Provider>> = self.select(&query.providers);
         let per_provider_time = self.settings.max_provider_time();
 
-        let mut set: JoinSet<(usize, ProviderState, Vec<Finding>)> = JoinSet::new();
+        let mut set: JoinSet<(usize, ProviderState, Vec<Ranked>)> = JoinSet::new();
         for (index, provider) in selected.iter().enumerate() {
             let provider = Arc::clone(provider);
             let text = query.text.clone();
@@ -74,7 +74,7 @@ impl Registry {
         }
 
         // Ordered by provider index so output is stable regardless of finish order.
-        let mut collected: Vec<Option<(ProviderState, Vec<Finding>)>> =
+        let mut collected: Vec<Option<(ProviderState, Vec<Ranked>)>> =
             (0..selected.len()).map(|_| None).collect();
         let mut panicked = Vec::new();
         while let Some(joined) = set.join_next().await {
@@ -143,13 +143,13 @@ async fn run_provider(
     query: String,
     limit: usize,
     budget: Duration,
-) -> (usize, ProviderState, Vec<Finding>) {
+) -> (usize, ProviderState, Vec<Ranked>) {
     let name = provider.name().to_string();
     let started = Instant::now();
     let outcome = tokio::time::timeout(budget, provider.search(query, limit)).await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
-    let (status, mut results, error) = match outcome {
+    let (status, findings, error) = match outcome {
         Ok(Ok(results)) => (ProviderStatus::Ok, results, None),
         Ok(Err(error)) => {
             let status = match error.cause {
@@ -164,9 +164,16 @@ async fn run_provider(
             Some(ProviderError::network("provider exceeded its deadline").message),
         ),
     };
-    for (rank, finding) in results.iter_mut().enumerate() {
-        finding.rank = rank + 1;
-    }
+    // Stamp each finding with its rank in this provider's own ordering; fusion
+    // scores on that, not on where it lands in the merged concatenation.
+    let results: Vec<Ranked> = findings
+        .into_iter()
+        .enumerate()
+        .map(|(rank, finding)| Ranked {
+            finding,
+            rank: rank + 1,
+        })
+        .collect();
 
     let state = ProviderState {
         name,
@@ -181,47 +188,48 @@ async fn run_provider(
 /// Merge provider answers with reciprocal-rank fusion: each provider votes
 /// `1/(k + rank)`, so a URL several independent providers rank well rises above
 /// one that only a single provider liked. Duplicates collapse by normalized URL.
-fn fuse(results: &[Finding], limit: usize) -> Vec<Finding> {
+fn fuse(results: &[Ranked], limit: usize) -> Vec<Finding> {
     const K: f64 = 10.0;
     use std::collections::HashMap;
 
     struct Aggregate {
-        result: Finding,
+        finding: Finding,
         score: f64,
         order: usize,
     }
 
     let mut seen: HashMap<String, Aggregate> = HashMap::new();
     let mut order = 0usize;
-    for incoming in results {
-        let key = normalize_url(&incoming.url);
+    for ranked in results {
+        let key = normalize_url(&ranked.finding.url);
         if key.is_empty() {
             continue;
         }
         // The rank comes from the provider's own ordering, stamped before the
         // merge — not from this concatenation's position, which would penalize
         // whichever provider happened to be appended later.
-        let rank = incoming.rank.max(1);
+        let rank = ranked.rank.max(1);
         match seen.get_mut(&key) {
             Some(existing) => {
+                let incoming = &ranked.finding;
                 existing.score += 1.0 / (K + rank as f64);
-                if existing.result.snippet.is_none() {
-                    existing.result.snippet = incoming.snippet.clone();
+                if existing.finding.snippet.is_none() {
+                    existing.finding.snippet = incoming.snippet.clone();
                 }
-                if existing.result.title.is_empty() && !incoming.title.is_empty() {
-                    existing.result.title = incoming.title.clone();
+                if existing.finding.title.is_empty() && !incoming.title.is_empty() {
+                    existing.finding.title = incoming.title.clone();
                 }
-                if !existing.result.providers.contains(&incoming.providers) {
-                    existing.result.providers.push(',');
-                    existing.result.providers.push_str(&incoming.providers);
+                for provider in &incoming.providers {
+                    if !existing.finding.providers.contains(provider) {
+                        existing.finding.providers.push(provider);
+                    }
                 }
             }
             None => {
-                let result = incoming.clone();
                 seen.insert(
                     key,
                     Aggregate {
-                        result,
+                        finding: ranked.finding.clone(),
                         score: 1.0 / (K + rank as f64),
                         order,
                     },
@@ -241,8 +249,8 @@ fn fuse(results: &[Finding], limit: usize) -> Vec<Finding> {
     out.into_iter()
         .take(limit)
         .map(|mut aggregate| {
-            aggregate.result.score = aggregate.score;
-            aggregate.result
+            aggregate.finding.score = aggregate.score;
+            aggregate.finding
         })
         .collect()
 }
@@ -296,13 +304,15 @@ pub(super) fn normalize_url(raw: &str) -> String {
 mod tests {
     use super::*;
 
-    fn result(url: &str, providers: &str, rank: usize) -> Finding {
-        Finding {
-            title: url.into(),
-            url: url.into(),
-            snippet: None,
-            providers: providers.into(),
-            score: 0.0,
+    fn ranked(url: &str, provider: &'static str, rank: usize) -> Ranked {
+        Ranked {
+            finding: Finding {
+                title: url.into(),
+                url: url.into(),
+                snippet: None,
+                providers: vec![provider],
+                score: 0.0,
+            },
             rank,
         }
     }
@@ -314,24 +324,24 @@ mod tests {
     #[test]
     fn fusion_prefers_agreement() {
         let merged = vec![
-            result("https://a.example/x", "brave", 1),
-            result("https://a.example/x", "wikipedia", 1),
-            result("https://b.example/y", "brave", 2),
-            result("https://c.example/z", "mwmbl", 1),
+            ranked("https://a.example/x", "brave", 1),
+            ranked("https://a.example/x", "wikipedia", 1),
+            ranked("https://b.example/y", "brave", 2),
+            ranked("https://c.example/z", "mwmbl", 1),
         ];
-        let ranked = fuse(&merged, 10);
-        assert_eq!(ranked.len(), 3, "duplicates collapse");
-        assert_eq!(ranked[0].url, "https://a.example/x");
+        let out = fuse(&merged, 10);
+        assert_eq!(out.len(), 3, "duplicates collapse");
+        assert_eq!(out[0].url, "https://a.example/x");
         assert!(
-            ranked[0].providers.contains("brave") && ranked[0].providers.contains("wikipedia"),
-            "both providers are named"
+            out[0].providers.contains(&"brave") && out[0].providers.contains(&"wikipedia"),
+            "both providers are named, as a list"
         );
         // The single-vote rank-1 (mwmbl) must outrank the single-vote rank-2.
-        let single_rank_one = ranked
+        let single_rank_one = out
             .iter()
             .position(|r| r.url == "https://c.example/z")
             .unwrap();
-        let single_rank_two = ranked
+        let single_rank_two = out
             .iter()
             .position(|r| r.url == "https://b.example/y")
             .unwrap();
@@ -346,14 +356,27 @@ mod tests {
     #[test]
     fn fusion_scores_on_provider_rank_not_position() {
         let merged = vec![
-            result("https://first.example/a", "brave", 5),
-            result("https://second.example/b", "wikipedia", 1),
+            ranked("https://first.example/a", "brave", 5),
+            ranked("https://second.example/b", "wikipedia", 1),
         ];
-        let ranked = fuse(&merged, 10);
+        let out = fuse(&merged, 10);
         assert_eq!(
-            ranked[0].url, "https://second.example/b",
+            out[0].url, "https://second.example/b",
             "the rank-1 finding wins even though it was merged second"
         );
+    }
+
+    /// A provider name that is a substring of another must not dedupe as if it
+    /// were the same provider — the bug a joined string invited.
+    #[test]
+    fn provider_names_are_compared_whole() {
+        let merged = vec![
+            ranked("https://a.example/x", "arxiv", 1),
+            ranked("https://a.example/x", "xiv", 2),
+        ];
+        let out = fuse(&merged, 10);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].providers, vec!["arxiv", "xiv"]);
     }
 
     /// Tracking parameters and fragments must not fragment a result.

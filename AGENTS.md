@@ -35,9 +35,11 @@ crates/core/  the engine (`search_core`)
                 parse.rs (defensive HTML scanners), web.rs (the seven providers:
                 brave · marginalia · mwmbl · wikipedia · hackernews ·
                 stackexchange · arxiv — each keyless)
-  fetch/        the fetcher: mod.rs (the guarded request, body caps, indexing),
-                guard.rs (the SSRF guard — the security-critical file),
-                extract.rs (HTML to readable text), cache.rs (recent answers)
+  fetch/        the fetcher: mod.rs (the guarded request, redirect following,
+                body caps, indexing), guard.rs (the SSRF guard and the resolver
+                — the security-critical file), extract/ (main-content
+                extraction, the visibility pass, passage selection),
+                cache.rs (recent answers)
   index/        the private corpus: mod.rs (Store over rusqlite, FTS search),
                 schema.rs (the tables, triggers, and the FTS query builder)
   search/       the MCP surface: mod.rs (Service, the in-process facade),

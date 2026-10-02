@@ -105,9 +105,8 @@ fn parse_brave(html: &str, limit: usize) -> Vec<Finding> {
             title,
             url,
             snippet,
-            providers: "brave".into(),
+            providers: vec!["brave"],
             score: 0.0,
-            rank: 0,
         });
         if out.len() >= limit {
             break;
@@ -157,9 +156,8 @@ fn parse_marginalia(html: &str, limit: usize) -> Vec<Finding> {
             title,
             url,
             snippet: None,
-            providers: "marginalia".into(),
+            providers: vec!["marginalia"],
             score: 0.0,
-            rank: 0,
         });
         if out.len() >= limit {
             break;
@@ -219,9 +217,8 @@ fn parse_mwmbl(body: &str, limit: usize) -> Result<Vec<Finding>, ProviderError> 
                     .unwrap_or_default(),
                 url,
                 snippet: row.extract.first().map(|f| f.value.clone()),
-                providers: "mwmbl".into(),
+                providers: vec!["mwmbl"],
                 score: 0.0,
-                rank: 0,
             })
         })
         .take(limit)
@@ -280,9 +277,8 @@ fn parse_wikipedia(body: &str, limit: usize) -> Result<Vec<Finding>, ProviderErr
                 hit.title.replace(' ', "_")
             ),
             snippet: Some(parse::strip_tags(&hit.snippet)),
-            providers: "wikipedia".into(),
+            providers: vec!["wikipedia"],
             score: 0.0,
-            rank: 0,
         })
         .take(limit)
         .collect())
@@ -346,9 +342,8 @@ fn parse_hn(body: &str, limit: usize) -> Result<Vec<Finding>, ProviderError> {
                 title,
                 url,
                 snippet: Some(parse::strip_tags(&hit.story_text)).filter(|s| !s.is_empty()),
-                providers: "hackernews".into(),
+                providers: vec!["hackernews"],
                 score: 0.0,
-                rank: 0,
             })
         })
         .take(limit)
@@ -401,9 +396,8 @@ fn parse_stackexchange(body: &str, limit: usize) -> Result<Vec<Finding>, Provide
                 &parse::strip_tags(&item.body_markdown),
                 300,
             )),
-            providers: "stackexchange".into(),
+            providers: vec!["stackexchange"],
             score: 0.0,
-            rank: 0,
         })
         .take(limit)
         .collect())
@@ -446,9 +440,8 @@ fn parse_arxiv(body: &str, limit: usize) -> Vec<Finding> {
                 &collapse(&first_element(entry, "summary")),
                 300,
             )),
-            providers: "arxiv".into(),
+            providers: vec!["arxiv"],
             score: 0.0,
-            rank: 0,
         });
         if out.len() >= limit {
             break;

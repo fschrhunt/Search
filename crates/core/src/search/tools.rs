@@ -16,6 +16,7 @@ use rmcp::{
 
 use crate::discovery::{Query, Response};
 use crate::fetch::Fetched;
+use crate::text::{select as passages, Passage, DEFAULT_BUDGET};
 
 use super::Service;
 
@@ -32,11 +33,9 @@ pub struct Server {
 /// Arguments for `web_search`.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchArgs {
-    /// One to five concise keyword queries.
+    /// One to five concise keyword queries. Each is searched independently and
+    /// reported in order.
     pub queries: Vec<String>,
-    /// The question or goal driving the search.
-    #[serde(default)]
-    pub objective: Option<String>,
     /// Maximum results per query (default 10, max 50).
     #[serde(default)]
     pub limit: Option<usize>,
@@ -50,25 +49,64 @@ pub struct SearchArgs {
 pub struct FetchArgs {
     /// One to ten http or https URLs to read.
     pub urls: Vec<String>,
-    /// The goal for why these URLs are being read.
+    /// What you are looking for in these pages. When given, only the passages
+    /// that match are returned, which is far cheaper than the whole page.
     #[serde(default)]
-    pub objective: Option<String>,
+    pub query: Option<String>,
+    /// The most characters to return per page (default 6000, max 40000).
+    #[serde(default)]
+    pub max_characters: Option<usize>,
 }
 
-/// The JSON shape a search tool returns.
+/// The JSON shape a search tool returns: one response per query, in order.
 #[derive(serde::Serialize)]
 struct SearchOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    objective: Option<String>,
     queries: Vec<Response>,
 }
 
-/// The JSON shape a fetch tool returns.
+/// One fetched page, either whole or reduced to the passages a query matched.
+#[derive(serde::Serialize)]
+struct FocusedPage {
+    #[serde(flatten)]
+    page: Fetched,
+    /// Present only when a query was given: the matching passages, replacing
+    /// `text` as the thing to read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    passages: Option<Vec<Passage>>,
+}
+
+impl FocusedPage {
+    /// Keep the whole text when no query narrowed it.
+    fn whole(page: Fetched) -> Self {
+        FocusedPage {
+            page,
+            passages: None,
+        }
+    }
+
+    /// Reduce to the passages matching `query`; the whole text is dropped so the
+    /// model is not tempted to read past the answer.
+    fn build(mut page: Fetched, query: &str, budget: usize) -> Self {
+        if query.trim().is_empty() || page.text.is_empty() {
+            return Self::whole(page);
+        }
+        let found = passages(&page.text, query, budget);
+        if found.is_empty() {
+            return Self::whole(page);
+        }
+        // The full text stays in the index; the tool answer does not carry it.
+        page.text = String::new();
+        FocusedPage {
+            page,
+            passages: Some(found),
+        }
+    }
+}
+
+/// The combined answer the fetch tool returns.
 #[derive(serde::Serialize)]
 struct FetchOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    objective: Option<String>,
-    pages: Vec<Fetched>,
+    pages: Vec<FocusedPage>,
 }
 
 #[tool_router]
@@ -83,7 +121,7 @@ impl Server {
 
     #[tool(
         name = "web_search",
-        description = "Search the live web across several independent providers. Returns ranked results with title, URL, and snippet. Prefer concise keyword queries; fetch the important URLs before relying on them."
+        description = "Search the live web across several independent providers and return ranked results with title, URL, and snippet. Use it when you need current information, source discovery, or facts you are not confident about; do not use it for a page you already have a URL for — fetch that instead. The results are a starting point: read the few that matter with web_fetch before relying on them. Every answer names which providers responded, so an empty result is never mistaken for a broken one."
     )]
     async fn web_search(
         &self,
@@ -114,15 +152,12 @@ impl Server {
                 .await;
             responses.push(response);
         }
-        json_result(SearchOutput {
-            objective: args.objective,
-            queries: responses,
-        })
+        json_result(SearchOutput { queries: responses })
     }
 
     #[tool(
         name = "web_fetch",
-        description = "Read one or more URLs as clean text, and add them to the local index. Public internet only: private and link-local addresses are refused."
+        description = "Read one or more URLs as clean, readable text, and add them to the local index. Pass a query to get only the passages that match it instead of the whole page — this is almost always what you want, and it is far cheaper. Reading is safe to repeat: a page read once is served instantly from the index. Public internet only: private and link-local addresses are refused."
     )]
     async fn web_fetch(
         &self,
@@ -134,12 +169,20 @@ impl Server {
                 None,
             ));
         }
+        let budget = args
+            .max_characters
+            .unwrap_or(DEFAULT_BUDGET)
+            .clamp(500, 40_000);
         let urls: Vec<String> = args.urls.into_iter().take(10).collect();
         let pages = self.service.fetch(&urls).await;
-        json_result(FetchOutput {
-            objective: args.objective,
-            pages,
-        })
+
+        // With a query, return only the matching passages; without one, the text.
+        let query = args.query.unwrap_or_default();
+        let focused: Vec<FocusedPage> = pages
+            .into_iter()
+            .map(|page| FocusedPage::build(page, &query, budget))
+            .collect();
+        json_result(FetchOutput { pages: focused })
     }
 }
 

@@ -133,7 +133,10 @@ impl Store {
                 Ok(Hit {
                     url: row.get(0)?,
                     title: row.get(1)?,
-                    snippet: snippet(&text),
+                    // The snippet is the passage that matched the query, not the
+                    // document's opening: a snippet without the query terms says
+                    // nothing about why the page was returned.
+                    snippet: snippet(&text, query),
                     host: row.get(3)?,
                     fetched_at: row.get(4)?,
                     // bm25 returns smaller-is-better negative values; invert for
@@ -185,13 +188,21 @@ impl Store {
 
 /// A short snippet around the first query term found in `text`. Falls back to
 /// the document's opening when no term is found verbatim.
-fn snippet(text: &str) -> String {
-    const WINDOW: usize = 200;
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() <= WINDOW {
-        return collapsed;
+/// The passage of `text` that best matches `query`, or the opening when the
+/// query matches nothing. Reuses the fetcher's passage scorer so the index and
+/// the tool agree on what "the relevant part" means.
+fn snippet(text: &str, query: &str) -> String {
+    const WINDOW: usize = 240;
+    let passages = crate::text::select(text, query, WINDOW);
+    if let Some(first) = passages.first() {
+        let mut out = first.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if out.chars().count() > WINDOW {
+            out = out.chars().take(WINDOW).collect::<String>() + "…";
+        }
+        return out;
     }
-    collapsed.chars().take(WINDOW).collect::<String>() + "…"
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed.chars().take(WINDOW).collect::<String>()
 }
 
 /// Extract the host from a URL, for grouping and display.

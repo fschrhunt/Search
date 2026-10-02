@@ -17,6 +17,26 @@ use crate::index::{self, Store};
 
 pub use guard::{is_public_ip, GuardError};
 
+/// The most client-side redirects followed before giving up, so a loop of
+/// redirect stubs cannot spin the fetcher.
+const MAX_REDIRECT_HOPS: usize = 3;
+
+/// Decide whether to follow a client-side redirect target. The target came from
+/// an untrusted page, so it is accepted only when it is a well-formed http(s)
+/// URL that passes the SSRF guard, does not loop, and is within the hop budget.
+/// Returns the URL to fetch next, or `None` to stop.
+fn follow_target(next: &str, current: &str, hops: usize, allow_private: bool) -> Option<String> {
+    if hops > MAX_REDIRECT_HOPS || next == current {
+        return None;
+    }
+    let parsed = url::Url::parse(next).ok()?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return None;
+    }
+    guard::check_host(parsed.host_str().unwrap_or(""), allow_private).ok()?;
+    Some(next.to_string())
+}
+
 /// The outcome of one fetch.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Fetched {
@@ -27,11 +47,21 @@ pub struct Fetched {
     pub content_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub byline: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexed: Option<bool>,
+    /// A client-side redirect target, followed by the caller. Not serialized:
+    /// a model is shown the final page, never told to fetch another URL.
+    #[serde(skip)]
+    pub redirect: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -110,7 +140,34 @@ impl Fetcher {
 
     /// Retrieve one URL, indexing it when configured. A failure is returned, not
     /// panicked, so a batch caller can report partial success.
+    ///
+    /// A page that exists only to redirect the reader elsewhere (a trailing-slash
+    /// or canonical-URL move, delivered by a meta refresh or a script) is
+    /// followed to its target. Each target came from an untrusted page, so it is
+    /// run back through the SSRF guard, and the chain is bounded so a redirect
+    /// loop cannot spin.
     pub async fn fetch(&self, raw: &str) -> Result<Fetched, FetchError> {
+        let mut target = raw.to_string();
+        let mut hops = 0usize;
+        loop {
+            let fetched = self.fetch_one(&target).await?;
+            let Some(next) = fetched.redirect.clone() else {
+                return Ok(fetched);
+            };
+            hops += 1;
+            match follow_target(&next, &target, hops, self.settings.allow_private) {
+                Some(next) => {
+                    target = next;
+                }
+                // A redirect that is unsafe, malformed, or looping stops here and
+                // the stub itself is returned — never followed blindly.
+                None => return Ok(fetched),
+            }
+        }
+    }
+
+    /// One request and extraction, with no redirect following.
+    async fn fetch_one(&self, raw: &str) -> Result<Fetched, FetchError> {
         let parsed = url::Url::parse(raw).map_err(|_| FetchError::Scheme)?;
         if parsed.scheme() != "http" && parsed.scheme() != "https" {
             return Err(FetchError::Scheme);
@@ -150,20 +207,39 @@ impl Fetcher {
         let (body, truncated) = read_capped(response, self.settings.max_bytes)
             .await
             .map_err(FetchError::Network)?;
-        let (title, text) = if is_html(&content_type) {
-            extract::read(&body)
+
+        // Extraction is CPU-bound and its types are not `Send`, so it runs on a
+        // blocking thread with the body moved in and a plain `Page` returned.
+        let (page, final_url) = if is_html(&content_type) {
+            let url_for_links = final_url.clone();
+            let page = tokio::task::spawn_blocking(move || extract::read(&body, &url_for_links))
+                .await
+                .map_err(|e| FetchError::Network(format!("extraction task failed: {e}")))?;
+            (page, final_url)
         } else {
-            (String::new(), extract::sanitize(body.as_bytes()))
+            let text = extract::sanitize(body.as_bytes());
+            (
+                extract::Page {
+                    title: String::new(),
+                    byline: None,
+                    published: None,
+                    site: None,
+                    text,
+                    redirect: None,
+                },
+                final_url,
+            )
         };
-        if text.trim().is_empty() {
+        if page.text.trim().is_empty() {
             return Err(FetchError::Empty);
         }
+        let text = page.text;
 
         let mut indexed = None;
         if self.settings.should_index() {
             let doc = index::Doc {
                 url: final_url.clone(),
-                title: title.clone(),
+                title: page.title.clone(),
                 text: text.clone(),
                 host: index::host_of(&final_url),
                 fetched_at: now_unix(),
@@ -176,10 +252,14 @@ impl Fetcher {
             final_url: Some(final_url),
             status: status.as_u16(),
             content_type,
-            title: Some(title).filter(|t| !t.is_empty()),
+            title: Some(page.title).filter(|t| !t.is_empty()),
+            byline: page.byline,
+            published: page.published,
+            site: page.site,
             text,
             truncated: Some(truncated).filter(|t| *t),
             indexed,
+            redirect: page.redirect,
             error: None,
         };
         self.cache.put(raw, &fetched);
@@ -204,9 +284,13 @@ impl Fetcher {
                     status: 0,
                     content_type: String::new(),
                     title: None,
+                    byline: None,
+                    published: None,
+                    site: None,
                     text: String::new(),
                     truncated: None,
                     indexed: None,
+                    redirect: None,
                     error: Some(error.message()),
                 },
             })
@@ -302,5 +386,44 @@ mod tests {
             fetcher.fetch("ftp://example.com/x").await,
             Err(FetchError::Scheme)
         ));
+    }
+
+    /// A client-side redirect target is untrusted page content, so the follow
+    /// decision must refuse a private destination, a non-http scheme, a loop,
+    /// and anything past the hop budget.
+    #[test]
+    fn follow_target_guards_every_redirect() {
+        let current = "https://example.com/a";
+        // A public http(s) target is followed, bounded by the hop budget.
+        assert_eq!(
+            follow_target("https://example.com/b", current, 1, false).as_deref(),
+            Some("https://example.com/b")
+        );
+        // Private destinations are refused.
+        for private in [
+            "http://169.254.169.254/",
+            "http://127.0.0.1/",
+            "http://[::1]/",
+            "http://localhost/",
+            "http://[64:ff9b::a9fe:a9fe]/",
+        ] {
+            assert_eq!(follow_target(private, current, 1, false), None, "{private}");
+        }
+        // A non-http scheme is refused.
+        assert_eq!(follow_target("file:///etc/passwd", current, 1, false), None);
+        // A loop back to where we are is refused.
+        assert_eq!(follow_target(current, current, 1, false), None);
+        // Past the hop budget, nothing more is followed.
+        assert_eq!(
+            follow_target(
+                "https://example.com/c",
+                current,
+                MAX_REDIRECT_HOPS + 1,
+                false
+            ),
+            None
+        );
+        // The guard's escape hatch, used only by tests and mirrors.
+        assert!(follow_target("http://127.0.0.1/", current, 1, true).is_some());
     }
 }

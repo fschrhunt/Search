@@ -17,12 +17,11 @@ pub struct Finding {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
-    /// The providers that returned this URL, joined for display.
-    pub providers: String,
+    /// Every provider that returned this URL, for transparency. A list, not a
+    /// joined string: a display concern must not decide a dedup comparison.
+    pub providers: Vec<&'static str>,
     /// Reciprocal-rank-fusion score; higher is better.
     pub score: f64,
-    /// The best rank any single provider gave this URL.
-    pub rank: usize,
 }
 
 /// Which providers to use and how many results to ask each for.
@@ -64,6 +63,14 @@ pub enum ProviderStatus {
     Error,
     Timeout,
     Cancelled,
+}
+
+/// A finding paired with the rank its provider gave it. Internal to the merge:
+/// the rank decides fusion weight and is not part of the model the caller sees.
+#[derive(Debug, Clone)]
+pub(crate) struct Ranked {
+    pub finding: Finding,
+    pub rank: usize,
 }
 
 /// A boxed future, so the `Provider` trait stays object-safe without an
