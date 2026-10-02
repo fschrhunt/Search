@@ -15,7 +15,8 @@ use rmcp::{
 };
 
 use crate::discovery::{Query, Response};
-use crate::fetch::{passages, Fetched, Passage, DEFAULT_BUDGET};
+use crate::fetch::Fetched;
+use crate::text::{select as passages, Passage, DEFAULT_BUDGET};
 
 use super::Service;
 

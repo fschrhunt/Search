@@ -24,6 +24,7 @@ pub mod discovery;
 pub mod fetch;
 pub mod index;
 pub mod search;
+pub mod text;
 
 /// Release identity supplied by the release workflow; local builds keep the
 /// manifest version.

@@ -1,17 +1,21 @@
-//! Select the passages of an extracted page that answer a query.
+//! Extractive passage selection: the paragraphs of a document that best answer
+//! a query.
 //!
 //! A model reading a whole page spends context on everything irrelevant; the
 //! mature agent tools return query-focused excerpts instead (Exa's "highlights",
 //! Brave's `llm_context`, Claude's short `cited_text`). The technique is
 //! classical extractive retrieval and needs no model: score each paragraph
 //! against the query by term overlap with an inverse-document-frequency weight,
-//! then return the best paragraphs with a sentence of context around each.
+//! then return the best paragraphs within a character budget.
 //!
-//! This is deliberately simple. The corpus is one page, the queries are short,
-//! and the goal is to hand an agent the two or three paragraphs that matter
-//! instead of forty that do not.
+//! It lives beside the other text processing rather than inside the fetcher, so
+//! both the fetcher's reader and the index's snippets share one definition of
+//! "the relevant part" without either depending on the other.
 
 use std::collections::HashMap;
+
+/// The number of characters a query-focused read returns by default.
+pub const DEFAULT_BUDGET: usize = 6_000;
 
 /// One selected passage with the score that chose it.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -20,12 +24,9 @@ pub struct Passage {
     pub score: f64,
 }
 
-/// The default number of characters a query-focused read returns.
-pub const DEFAULT_BUDGET: usize = 6_000;
-
 /// Rank the paragraphs of `text` against `query`, returning the best ones up to
 /// a character budget. With an empty query, the opening of the document is
-/// returned (`keep`).
+/// returned.
 pub fn select(text: &str, query: &str, budget: usize) -> Vec<Passage> {
     let paragraphs = split_paragraphs(text);
     if paragraphs.is_empty() {
@@ -82,7 +83,6 @@ pub fn select(text: &str, query: &str, budget: usize) -> Vec<Passage> {
             score: 0.0,
         }];
     }
-    // Best-scoring paragraph first; ties keep document order.
     scored.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
