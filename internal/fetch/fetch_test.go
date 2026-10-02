@@ -77,6 +77,30 @@ func TestFetchRefusesPrivateBeforeDialing(t *testing.T) {
 	}
 }
 
+// TestAlternateIPLiteralFormsRefused pins that decimal, octal, and hex IPv4
+// literals reach loopback only through name resolution, and are still refused —
+// the resolve-then-dial design is what closes this, so a future change that
+// skipped resolver normalization must fail here.
+func TestAlternateIPLiteralFormsRefused(t *testing.T) {
+	store := openTempStore(t)
+	f, err := New(config.FetchConfig{MaxBytes: 1024, MaxRedirects: 3, MaxConcurrency: 2}, store, discardLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{
+		"http://2130706433/",         // decimal 127.0.0.1
+		"http://0x7f000001/",         // hex 127.0.0.1
+		"http://0177.0.0.1/",         // octal 127.0.0.1
+		"http://127.1/",              // short form 127.0.0.1
+		"http://[::ffff:127.0.0.1]/", // IPv4-mapped loopback
+	} {
+		res := f.Fetch(context.Background(), raw)
+		if res.Error == "" {
+			t.Errorf("fetch(%s) should have been refused, got %+v", raw, res)
+		}
+	}
+}
+
 // TestExtractReadsTitleAndText pins the HTML-to-text path.
 func TestExtractReadsTitleAndText(t *testing.T) {
 	doc := []byte(`<html><head><title>Doc Title</title><style>x{}</style></head>
