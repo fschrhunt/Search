@@ -1,0 +1,14 @@
+# Build output
+/search
+/search-*
+*.test
+
+# Local data
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Editor and OS
+.DS_Store
+*.swp
