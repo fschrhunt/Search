@@ -12,8 +12,10 @@ use std::time::Duration;
 use super::parse;
 use super::{Finding, Provider, ProviderError, ProviderFuture};
 
-/// A browser-realistic user agent. Several engines refuse a client that does not
-/// look like a browser; this is honest about being a fetcher in the URL only.
+/// A browser user agent, sent deliberately. Several engines answer a non-browser
+/// client with a challenge or a 403, so search presents the same fingerprint a
+/// browser would. It is a known cost of scraping; the alternative is not to use
+/// those providers at all.
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 /// One shared client: a bounded pool, per-call timeouts via the caller's
@@ -59,15 +61,7 @@ fn parse_json<T: serde::de::DeserializeOwned>(
 
 /// Brave's server-rendered search page. The strongest general index available
 /// without a key, and the primary English result source.
-pub(super) struct Brave {
-    enabled: bool,
-}
-
-impl Brave {
-    pub(super) fn new(enabled: bool) -> Self {
-        Brave { enabled }
-    }
-}
+pub(super) struct Brave;
 
 impl Provider for Brave {
     fn name(&self) -> &'static str {
@@ -75,11 +69,7 @@ impl Provider for Brave {
     }
 
     fn search(&self, query: String, limit: usize) -> ProviderFuture {
-        let enabled = self.enabled;
         Box::pin(async move {
-            if !enabled {
-                return Ok(Vec::new());
-            }
             let url = format!(
                 "https://search.brave.com/search?q={}",
                 percent_encoding::utf8_percent_encode(&query, percent_encoding::NON_ALPHANUMERIC)

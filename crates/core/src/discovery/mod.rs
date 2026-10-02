@@ -144,8 +144,8 @@ impl std::error::Error for ProviderError {}
 pub(super) fn default_providers(
     settings: &crate::config::EngineSettings,
 ) -> Vec<Box<dyn Provider>> {
-    let mut providers: Vec<Box<dyn Provider>> = vec![
-        Box::new(web::Brave::new(settings_enabled(settings, "brave"))),
+    let providers: Vec<Box<dyn Provider>> = vec![
+        Box::new(web::Brave),
         Box::new(web::Marginalia),
         Box::new(web::Mwmbl),
         Box::new(web::Wikipedia),
@@ -153,12 +153,10 @@ pub(super) fn default_providers(
         Box::new(web::StackExchange),
         Box::new(web::Arxiv),
     ];
-    providers.retain(|p| enabled(settings, p.name()));
     providers
-}
-
-fn settings_enabled(settings: &crate::config::EngineSettings, name: &str) -> bool {
-    enabled(settings, name)
+        .into_iter()
+        .filter(|provider| enabled(settings, provider.name()))
+        .collect()
 }
 
 fn enabled(settings: &crate::config::EngineSettings, name: &str) -> bool {

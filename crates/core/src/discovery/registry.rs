@@ -118,27 +118,25 @@ impl Registry {
         }
     }
 
-    /// Restrict to the requested names, preserving registry order. Unknown names
-    /// are ignored so a stale client never errors.
+    /// Restrict to the requested names, preserving registry order. A request for
+    /// names that match nothing returns no providers rather than silently
+    /// running them all — the caller sees the empty result and its cause.
     fn select(&self, names: &[String]) -> Vec<Arc<dyn Provider>> {
         if names.is_empty() {
             return self.providers.clone();
         }
-        let wanted: Vec<Arc<dyn Provider>> = self
-            .providers
+        self.providers
             .iter()
             .filter(|p| names.iter().any(|n| n == p.name()))
             .cloned()
-            .collect();
-        if wanted.is_empty() {
-            self.providers.clone()
-        } else {
-            wanted
-        }
+            .collect()
     }
 }
 
-/// Run one provider under its deadline and classify the outcome.
+/// Run one provider under its deadline and classify the outcome. Each result is
+/// stamped with its rank in this provider's own ordering, which is what fusion
+/// scores on — a provider's rank-1 must count as rank-1 no matter where its
+/// results land in the merged concatenation.
 async fn run_provider(
     index: usize,
     provider: Arc<dyn Provider>,
@@ -151,7 +149,7 @@ async fn run_provider(
     let outcome = tokio::time::timeout(budget, provider.search(query, limit)).await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
-    let (status, results, error) = match outcome {
+    let (status, mut results, error) = match outcome {
         Ok(Ok(results)) => (ProviderStatus::Ok, results, None),
         Ok(Err(error)) => {
             let status = match error.cause {
@@ -166,6 +164,9 @@ async fn run_provider(
             Some(ProviderError::network("provider exceeded its deadline").message),
         ),
     };
+    for (rank, finding) in results.iter_mut().enumerate() {
+        finding.rank = rank + 1;
+    }
 
     let state = ProviderState {
         name,
@@ -192,12 +193,15 @@ fn fuse(results: &[Finding], limit: usize) -> Vec<Finding> {
 
     let mut seen: HashMap<String, Aggregate> = HashMap::new();
     let mut order = 0usize;
-    for (position, incoming) in results.iter().enumerate() {
+    for incoming in results {
         let key = normalize_url(&incoming.url);
         if key.is_empty() {
             continue;
         }
-        let rank = position % results.len().max(1) + 1;
+        // The rank comes from the provider's own ordering, stamped before the
+        // merge — not from this concatenation's position, which would penalize
+        // whichever provider happened to be appended later.
+        let rank = incoming.rank.max(1);
         match seen.get_mut(&key) {
             Some(existing) => {
                 existing.score += 1.0 / (K + rank as f64);
@@ -213,8 +217,7 @@ fn fuse(results: &[Finding], limit: usize) -> Vec<Finding> {
                 }
             }
             None => {
-                let mut result = incoming.clone();
-                result.rank = rank;
+                let result = incoming.clone();
                 seen.insert(
                     key,
                     Aggregate {
@@ -304,7 +307,10 @@ mod tests {
         }
     }
 
-    /// A URL two providers rank highly must beat one only a single provider liked.
+    /// A URL two providers rank highly must beat one only a single provider
+    /// liked, and two providers' rank-1s must score the same regardless of which
+    /// provider was merged first — the bug where a later provider's rank-1 was
+    /// scored as if it were deep in the list.
     #[test]
     fn fusion_prefers_agreement() {
         let merged = vec![
@@ -319,6 +325,34 @@ mod tests {
         assert!(
             ranked[0].providers.contains("brave") && ranked[0].providers.contains("wikipedia"),
             "both providers are named"
+        );
+        // The single-vote rank-1 (mwmbl) must outrank the single-vote rank-2.
+        let single_rank_one = ranked
+            .iter()
+            .position(|r| r.url == "https://c.example/z")
+            .unwrap();
+        let single_rank_two = ranked
+            .iter()
+            .position(|r| r.url == "https://b.example/y")
+            .unwrap();
+        assert!(
+            single_rank_one < single_rank_two,
+            "a later provider's rank-1 must not be penalized by merge order"
+        );
+    }
+
+    /// Rank is taken from the provider's own ordering, so a rank-1 finding does
+    /// not inherit the concatenation position.
+    #[test]
+    fn fusion_scores_on_provider_rank_not_position() {
+        let merged = vec![
+            result("https://first.example/a", "brave", 5),
+            result("https://second.example/b", "wikipedia", 1),
+        ];
+        let ranked = fuse(&merged, 10);
+        assert_eq!(
+            ranked[0].url, "https://second.example/b",
+            "the rank-1 finding wins even though it was merged second"
         );
     }
 
