@@ -17,6 +17,9 @@ use crate::index::{self, Store};
 
 pub use guard::{is_public_ip, GuardError};
 
+/// Extractive passage selection over a fetched page, for the tool surface.
+pub use extract::{passages, Passage, DEFAULT_BUDGET};
+
 /// The most client-side redirects followed before giving up, so a loop of
 /// redirect stubs cannot spin the fetcher.
 const MAX_REDIRECT_HOPS: usize = 3;

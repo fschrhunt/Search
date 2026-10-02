@@ -18,10 +18,13 @@
 //!
 //! Non-HTML bodies pass through [`sanitize`], which still makes them safe text.
 
+mod passages;
 mod serialize;
 mod visibility;
 
 pub(super) use serialize::Page;
+
+pub use passages::{select as passages, Passage, DEFAULT_BUDGET};
 
 use dom_smoothie::{Config, Readability, TextMode};
 
