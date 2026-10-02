@@ -58,9 +58,13 @@ mod tests {
             status: 200,
             content_type: "text/html".into(),
             title: None,
+            byline: None,
+            published: None,
+            site: None,
             text: "body".into(),
             truncated: None,
             indexed: None,
+            redirect: None,
             error: None,
         }
     }

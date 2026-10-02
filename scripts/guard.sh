@@ -20,11 +20,13 @@ prod_sources() {
 
 # 1. Network surface. search talks to its discovery providers and the pages a
 #    caller asks it to fetch, and nothing else. A new provider means a new host
-#    user queries can reach — add it here deliberately or the build fails.
+#    user queries can reach — add it here deliberately or the build fails. Hosts
+#    named only in a comment (a doc example, an injection illustration) are not
+#    call sites and are skipped.
 allowed_hosts="index.crates.io crates.io static.crates.io search.brave.com old-search.marginalia.nu api.mwmbl.org en.wikipedia.org hn.algolia.com news.ycombinator.com api.stackexchange.com export.arxiv.org example.com example.invalid localhost 127.0.0.1 0.0.0.0 github.com"
 found_hosts=$(
     for f in $(prod_sources); do
-        awk '/^#\[cfg\(test\)\]/ { exit } { print }' "$f"
+        awk '/^#\[cfg\(test\)\]/ { exit } /^[[:space:]]*(\/\/|\*)/ { next } { print }' "$f"
     done | grep -ohE 'https?://[A-Za-z0-9.:-]+' | sed -E 's#https?://##' | sort -u
 )
 for host in $found_hosts; do
