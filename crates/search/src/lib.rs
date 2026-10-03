@@ -1,10 +1,8 @@
-//! The search engine, terminal-free and frontend-free: discovery across
-//! several independent providers, a hardened fetcher, a private on-disk index,
-//! and the MCP surface that exposes search and fetch as tools.
+//! The search engine library: discovery across independent providers, a
+//! hardened fetcher, and a private on-disk index.
 //!
-//! The binary is a separate crate that depends on this one. Nothing here names
-//! a terminal or a transport the binary owns; this crate's Rust items are not a
-//! stable third-party API.
+//! Frontends and protocol adapters depend on this crate; the engine does not
+//! depend on a terminal, listener, or protocol.
 //!
 //! Shipped code denies explicit panic sites outside test builds. Every allowed
 //! site needs a proof comment explaining why runtime input cannot reach it.
@@ -23,8 +21,14 @@ pub mod config;
 pub mod discovery;
 pub mod fetch;
 pub mod index;
-pub mod search;
+mod service;
 pub mod text;
+
+pub use config::Config;
+pub use discovery::{Finding, Query, Response};
+pub use fetch::Fetched;
+pub use index::{Hit, Stats};
+pub use service::{Search, SearchError};
 
 /// Release identity supplied by the release workflow; local builds keep the
 /// manifest version.

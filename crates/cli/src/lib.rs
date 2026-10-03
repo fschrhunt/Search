@@ -1,13 +1,11 @@
-//! The `search` binary: argument parsing, the serve loop, and the two MCP
-//! transports. The engine itself lives in `search_core`; this crate only puts
-//! it behind a command line and a listener.
+//! The Search command line and HTTP API. Engine and MCP behavior live in their
+//! own crates and are composed here into the `search` executable.
 
 pub mod args;
 pub mod http;
-pub mod mcp;
 pub mod render;
 pub mod run;
 pub mod stdio;
 
 /// The product version, for `search version` and the MCP server info.
-pub use search_core::VERSION;
+pub use search::VERSION;

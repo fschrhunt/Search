@@ -1,12 +1,4 @@
-//! The MCP surface: expose discovery and fetching to an agent as tools.
-//!
-//! `Service` is the in-process facade over the three concerns — discovery,
-//! fetch, and the index — and is what both the MCP tools and the binary's JSON
-//! API call. Keeping one facade means the two surfaces cannot drift.
-
-mod tools;
-
-pub use tools::{serve_stdio, Server};
+//! The in-process search engine over discovery, fetching, and the local index.
 
 use std::sync::Arc;
 
@@ -15,23 +7,23 @@ use crate::discovery::{self, Query, Response};
 use crate::fetch::{Fetched, Fetcher};
 use crate::index::{Store, StoreError};
 
-/// The wired service: everything a request handler needs, ready to use.
-pub struct Service {
+/// The configured search engine used in-process by applications and adapters.
+pub struct Search {
     registry: discovery::Registry,
     fetcher: Fetcher,
     store: Arc<Store>,
     config: Config,
 }
 
-impl Service {
-    /// Build the service, opening the index under the configured data directory.
-    pub fn open(config: Config) -> Result<Self, ServiceError> {
+impl Search {
+    /// Open the engine and its local index from the supplied configuration.
+    pub fn open(config: Config) -> Result<Self, SearchError> {
         let store = Arc::new(
-            Store::open(&config.data_dir, config.index.clone()).map_err(ServiceError::Store)?,
+            Store::open(&config.data_dir, config.index.clone()).map_err(SearchError::Store)?,
         );
         let fetcher = Fetcher::new(config.fetch.clone(), Arc::clone(&store), &config.user_agent);
         let registry = discovery::Registry::new(&config.engines, config.search.clone());
-        Ok(Service {
+        Ok(Search {
             registry,
             fetcher,
             store,
@@ -113,24 +105,24 @@ impl Service {
         &self.config
     }
 
-    /// The configured query ceiling, for the HTTP surface.
+    /// The configured deadline for a complete provider query.
     pub fn overall_timeout(&self) -> std::time::Duration {
         self.registry.overall_timeout()
     }
 }
 
-/// Why the service could not start.
+/// Why the search engine could not start.
 #[derive(Debug)]
-pub enum ServiceError {
+pub enum SearchError {
     Store(StoreError),
 }
 
-impl std::fmt::Display for ServiceError {
+impl std::fmt::Display for SearchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ServiceError::Store(error) => write!(f, "open index: {error}"),
+            SearchError::Store(error) => write!(f, "open index: {error}"),
         }
     }
 }
 
-impl std::error::Error for ServiceError {}
+impl std::error::Error for SearchError {}

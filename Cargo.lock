@@ -213,6 +213,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cli"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "mcp",
+ "search",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "compression-codecs"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1005,6 +1018,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
+name = "mcp"
+version = "0.1.0"
+dependencies = [
+ "rmcp",
+ "search",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1569,26 +1592,12 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "search"
 version = "0.1.0"
 dependencies = [
- "axum",
- "rmcp",
- "search-core",
- "serde",
- "serde_json",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "search-core"
-version = "0.1.0"
-dependencies = [
  "dom_query",
  "dom_smoothie",
  "futures",
  "percent-encoding",
  "regex",
  "reqwest",
- "rmcp",
  "rusqlite",
  "serde",
  "serde_json",

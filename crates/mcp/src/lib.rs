@@ -1,8 +1,16 @@
-//! The MCP tool handlers and the stdio transport.
+//! MCP tools and transports for the Search engine.
 //!
 //! Two tools, `web_search` and `web_fetch`, matching the shapes models already
-//! know. The stdio transport is what a locally spawned agent uses; the
-//! streamable HTTP transport lives in the binary, sharing these same handlers.
+//! know. This crate owns tool handlers and both stdio and streamable HTTP
+//! transports; the CLI decides where to mount them.
+
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::indexing_slicing
+)]
 
 use std::sync::Arc;
 
@@ -14,20 +22,21 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler, ServiceExt,
 };
 
-use crate::discovery::{Query, Response};
-use crate::fetch::Fetched;
-use crate::text::{select as passages, Passage, DEFAULT_BUDGET};
+use search::text::{select as passages, Passage, DEFAULT_BUDGET};
+use search::{Fetched, Query, Response, Search};
 
-use super::Service;
+mod http;
 
-/// The MCP server over the in-process service.
+pub use http::mount;
+
+/// The MCP server over the in-process search engine.
 #[derive(Clone)]
-pub struct Server {
-    service: Arc<Service>,
+pub struct McpServer {
+    search: Arc<Search>,
     /// Read by the `#[tool_handler]` macro's generated dispatch, which clippy's
     /// field-usage analysis cannot see. Scoped allow, proof: macro-generated use.
     #[allow(dead_code)]
-    tool_router: ToolRouter<Server>,
+    tool_router: ToolRouter<McpServer>,
 }
 
 /// Arguments for `web_search`.
@@ -110,18 +119,18 @@ struct FetchOutput {
 }
 
 #[tool_router]
-impl Server {
-    /// Build the MCP server for `service`.
-    pub fn new(service: Arc<Service>) -> Self {
-        Server {
-            service,
+impl McpServer {
+    /// Build the MCP server for an in-process search engine.
+    pub fn new(search: Arc<Search>) -> Self {
+        McpServer {
+            search,
             tool_router: Self::tool_router(),
         }
     }
 
     #[tool(
         name = "web_search",
-        description = "Search the live web across several independent providers and return ranked results with title, URL, and snippet. Use it when you need current information, source discovery, or facts you are not confident about; do not use it for a page you already have a URL for — fetch that instead. The results are a starting point: read the few that matter with web_fetch before relying on them. Every answer names which providers responded, so an empty result is never mistaken for a broken one."
+        description = "Search the private local index and live web across several independent providers; return ranked results with title, URL, and snippet. Use it when you need current information, source discovery, or facts you are not confident about; do not use it for a page you already have a URL for — fetch that instead. The results are a starting point: read the few that matter with web_fetch before relying on them. Every answer names which providers responded, so an empty result is never mistaken for a broken one."
     )]
     async fn web_search(
         &self,
@@ -142,7 +151,7 @@ impl Server {
         let mut responses = Vec::with_capacity(queries.len());
         for text in queries {
             let response = self
-                .service
+                .search
                 .search(Query {
                     text,
                     limit,
@@ -157,7 +166,7 @@ impl Server {
 
     #[tool(
         name = "web_fetch",
-        description = "Read one or more URLs as clean, readable text, and add them to the local index. Pass a query to get only the passages that match it instead of the whole page — this is almost always what you want, and it is far cheaper. Reading is safe to repeat: a page read once is served instantly from the index. Public internet only: private and link-local addresses are refused."
+        description = "Read one or more URLs as clean, readable text. When indexing is enabled, fetched pages join the local index. Pass a query to get only the passages that match it instead of the whole page — this is almost always what you want, and it is far cheaper. Public internet only: private and link-local addresses are refused."
     )]
     async fn web_fetch(
         &self,
@@ -174,7 +183,7 @@ impl Server {
             .unwrap_or(DEFAULT_BUDGET)
             .clamp(500, 40_000);
         let urls: Vec<String> = args.urls.into_iter().take(10).collect();
-        let pages = self.service.fetch(&urls).await;
+        let pages = self.search.fetch(&urls).await;
 
         // With a query, return only the matching passages; without one, the text.
         let query = args.query.unwrap_or_default();
@@ -187,10 +196,10 @@ impl Server {
 }
 
 #[tool_handler]
-impl ServerHandler for Server {
+impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("search", crate::VERSION))
+            .with_server_info(Implementation::new("search", search::VERSION))
             .with_instructions(
                 "Search the live web and read pages. Use web_search to find sources, then \
                  web_fetch to read the ones that matter. Results report which providers \
@@ -208,9 +217,9 @@ fn json_result<T: serde::Serialize>(value: T) -> Result<CallToolResult, McpError
 
 /// Serve MCP over stdin/stdout until the client disconnects.
 pub async fn serve_stdio(
-    service: Arc<Service>,
+    search: Arc<Search>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let running = Server::new(service).serve(stdio()).await?;
+    let running = McpServer::new(search).serve(stdio()).await?;
     running.waiting().await?;
     Ok(())
 }

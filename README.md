@@ -76,12 +76,14 @@ clean, query-focused reading. For a shared server, use MCP over HTTP instead.
 | Surface | Use it for |
 | --- | --- |
 | CLI | One-shot search, fetch, and local-index queries |
-| Rust | Use the in-process `search_core::search::Service` |
+| Rust | Use `search::Search` as an in-process engine |
 | HTTP | Integrate with scripts and services; includes status, search, index, and fetch endpoints |
 | MCP | Give an agent the `web_search` and `web_fetch` tools |
 
-The Rust API is available as a workspace library; it is not yet a published,
-stable third-party crate.
+The engine API lives in the `search` workspace crate. The `cli` and `mcp`
+workspace packages are separate adapters; MCP dependencies are not part of the
+engine crate. In Rust, start with `use search::{Config, Search};` and open a
+configured engine with `Search::open(config)`.
 
 ## Make it yours
 

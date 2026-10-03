@@ -61,14 +61,14 @@ done
 
 # 3. The SSRF guard must exist and deny the metadata address. Removing or
 #    weakening it is the one change this file exists to catch.
-guard=crates/core/src/fetch/guard.rs
+guard=crates/search/src/fetch/guard.rs
 [ -f "$guard" ] || bad "the SSRF guard file $guard is missing"
 grep -q "169.254" "$guard" || bad "the SSRF guard no longer covers link-local metadata"
 grep -q "fn is_public_ip" "$guard" || bad "the SSRF guard's is_public_ip is gone"
 grep -q "metadata.google.internal" "$guard" || bad "the SSRF guard no longer refuses the metadata hostname"
 
 # 4. The fetcher must call the guard before dialing.
-grep -q "guard::check_host" crates/core/src/fetch/mod.rs || bad "the fetcher no longer calls the SSRF guard"
+grep -q "guard::check_host" crates/search/src/fetch/mod.rs || bad "the fetcher no longer calls the SSRF guard"
 
 # 5. Every HTTP request must pass the bearer check. The MCP endpoint and the
 #    JSON API both sit behind the auth layer in the binary.

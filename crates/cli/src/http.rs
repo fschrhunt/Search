@@ -12,10 +12,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use search_core::discovery::Query;
-use search_core::search::Service;
+use search::discovery::Query;
+use search::Search;
+use search_mcp::mount as mount_mcp;
 
-use crate::mcp;
 use crate::run::build_service;
 
 /// Serve the JSON API and MCP over HTTP until interrupted.
@@ -34,7 +34,7 @@ pub async fn serve(
     if service.config().resolved_token().is_none() {
         eprintln!(
             "search: no token configured; set the variable named by tokenEnv (default {})",
-            search_core::config::DEFAULT_TOKEN_ENV
+            search::config::DEFAULT_TOKEN_ENV
         );
         return 1;
     }
@@ -49,7 +49,7 @@ pub async fn serve(
         "search: listening on {} (data {}, version {})",
         service.config().addr,
         service.config().data_dir.display(),
-        search_core::VERSION
+        search::VERSION
     );
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
@@ -66,9 +66,9 @@ pub async fn serve(
 
 /// Build the router. The auth layer wraps every route, MCP included. The token
 /// is resolved once here, so a per-request check never reads the environment.
-fn router(service: Arc<Service>) -> Router {
+fn router(service: Arc<Search>) -> Router {
     let allowed_host = service.config().addr.clone();
-    let mcp = mcp::mount(Arc::clone(&service), &allowed_host);
+    let mcp = mount_mcp(Arc::clone(&service), &allowed_host);
     let token = service.config().resolved_token().unwrap_or_default();
     let guard = AuthGuard {
         expected: Arc::new(token),
@@ -150,7 +150,7 @@ struct SearchParams {
 
 /// `GET /v1/search`.
 async fn search(
-    State(service): State<Arc<Service>>,
+    State(service): State<Arc<Search>>,
     axum::extract::Query(params): axum::extract::Query<SearchParams>,
 ) -> Response {
     let query = params.q.trim();
@@ -191,7 +191,7 @@ struct IndexParams {
 
 /// `GET /v1/index`.
 async fn index_search(
-    State(service): State<Arc<Service>>,
+    State(service): State<Arc<Search>>,
     axum::extract::Query(params): axum::extract::Query<IndexParams>,
 ) -> Response {
     let query = params.q.trim();
@@ -224,7 +224,7 @@ struct FetchBody {
 }
 
 /// `POST /v1/fetch`.
-async fn fetch(State(service): State<Arc<Service>>, Json(body): Json<FetchBody>) -> Response {
+async fn fetch(State(service): State<Arc<Search>>, Json(body): Json<FetchBody>) -> Response {
     if body.urls.is_empty() {
         return bad_request("no urls given");
     }
@@ -236,10 +236,10 @@ async fn fetch(State(service): State<Arc<Service>>, Json(body): Json<FetchBody>)
 }
 
 /// `GET /v1/status`.
-async fn status(State(service): State<Arc<Service>>) -> Response {
+async fn status(State(service): State<Arc<Search>>) -> Response {
     let stats = service.index_stats().ok();
     Json(serde_json::json!({
-        "version": search_core::VERSION,
+        "version": search::VERSION,
         "providers": service.provider_names(),
         "index": stats,
     }))
@@ -248,7 +248,7 @@ async fn status(State(service): State<Arc<Service>>) -> Response {
 
 /// `GET /healthz`.
 async fn health() -> Response {
-    Json(serde_json::json!({"status": "ok", "version": search_core::VERSION})).into_response()
+    Json(serde_json::json!({"status": "ok", "version": search::VERSION})).into_response()
 }
 
 /// A JSON 400.
