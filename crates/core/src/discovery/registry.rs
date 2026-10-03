@@ -169,10 +169,7 @@ async fn run_provider(
     let results: Vec<Ranked> = findings
         .into_iter()
         .enumerate()
-        .map(|(rank, finding)| Ranked {
-            finding,
-            rank: rank + 1,
-        })
+        .map(|(rank, finding)| Ranked::provider(finding, rank + 1))
         .collect();
 
     let state = ProviderState {
@@ -207,12 +204,14 @@ fn fuse(results: &[Ranked], limit: usize) -> Vec<Finding> {
         }
         // The rank comes from the provider's own ordering, stamped before the
         // merge — not from this concatenation's position, which would penalize
-        // whichever provider happened to be appended later.
+        // whichever provider happened to be appended later. The weight scales
+        // the vote, so the local corpus can count for more than one engine.
         let rank = ranked.rank.max(1);
+        let vote = ranked.weight.max(0.0) / (K + rank as f64);
         match seen.get_mut(&key) {
             Some(existing) => {
                 let incoming = &ranked.finding;
-                existing.score += 1.0 / (K + rank as f64);
+                existing.score += vote;
                 if existing.finding.snippet.is_none() {
                     existing.finding.snippet = incoming.snippet.clone();
                 }
@@ -230,7 +229,7 @@ fn fuse(results: &[Ranked], limit: usize) -> Vec<Finding> {
                     key,
                     Aggregate {
                         finding: ranked.finding.clone(),
-                        score: 1.0 / (K + rank as f64),
+                        score: vote,
                         order,
                     },
                 );
@@ -253,6 +252,63 @@ fn fuse(results: &[Ranked], limit: usize) -> Vec<Finding> {
             aggregate.finding
         })
         .collect()
+}
+
+/// Blend local corpus hits into a provider response, so a query the corpus
+/// already answers is answered partly from the box. A local hit is treated as
+/// one more provider named `index`: its BM25 rank becomes a rank, and the
+/// corpus's `weight` scales its vote, so a good local page can lead the merged
+/// list without the remote results being discarded.
+///
+/// The blend only ever *adds*: if the corpus has nothing, the response is
+/// unchanged, so search still works on a cold box.
+pub fn blend(response: &mut Response, local: &[crate::index::Hit], weight: f64, limit: usize) {
+    if local.is_empty() {
+        return;
+    }
+    let local_weight = if weight > 0.0 { weight } else { 1.0 };
+    let mut ranked: Vec<Ranked> = local
+        .iter()
+        .enumerate()
+        .map(|(rank, hit)| Ranked {
+            finding: Finding {
+                title: if hit.title.is_empty() {
+                    hit.url.clone()
+                } else {
+                    hit.title.clone()
+                },
+                url: hit.url.clone(),
+                snippet: Some(hit.snippet.clone()).filter(|s| !s.is_empty()),
+                providers: vec!["index"],
+                score: hit.score,
+            },
+            rank: rank + 1,
+            weight: local_weight,
+        })
+        .collect();
+
+    // Existing remote findings, as a ranked source, before fusion. They keep the
+    // default weight: the corpus is favored, not the web.
+    let remote: Vec<Ranked> = response
+        .results
+        .iter()
+        .enumerate()
+        .map(|(rank, finding)| Ranked::provider(finding.clone(), rank + 1))
+        .collect();
+
+    ranked.extend(remote);
+    response.results = fuse(&ranked, limit.max(1));
+    // Report the corpus as a source alongside the live providers.
+    if !response.providers.iter().any(|p| p.name == "index") {
+        response.providers.push(ProviderState {
+            name: "index".into(),
+            status: ProviderStatus::Ok,
+            count: local.len(),
+            error: None,
+            elapsed_ms: 0,
+        });
+        response.providers.sort_by(|a, b| a.name.cmp(&b.name));
+    }
 }
 
 /// Normalize a URL for deduplication: lowercased scheme and host, no fragment,
@@ -314,6 +370,7 @@ mod tests {
                 score: 0.0,
             },
             rank,
+            weight: 1.0,
         }
     }
 

@@ -12,7 +12,8 @@ mod settings;
 
 pub use settings::LogLevel;
 pub use settings::{
-    Config, EngineSettings, FetchSettings, SearchSettings, DEFAULT_ADDR, DEFAULT_TOKEN_ENV,
+    Config, EngineSettings, FetchSettings, IndexSettings, SearchSettings, DEFAULT_ADDR,
+    DEFAULT_TOKEN_ENV,
 };
 
 /// Load and validate configuration from `path`, falling back to `SEARCH_CONFIG`

@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Self-hosted, agent-first web search: one binary serving discovery, a hardened fetcher, and a private index"
+description = "Self-hosted web search with clean page reading and a private, growing index"
 publish = false
 
 [lib]

@@ -8,7 +8,7 @@ mod parse;
 mod registry;
 mod web;
 
-pub use registry::Registry;
+pub use registry::{blend, Registry};
 
 /// One discovered page, normalized across providers.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -65,12 +65,24 @@ pub enum ProviderStatus {
     Cancelled,
 }
 
-/// A finding paired with the rank its provider gave it. Internal to the merge:
-/// the rank decides fusion weight and is not part of the model the caller sees.
+/// A finding paired with the rank its provider gave it, and a weight scaling
+/// its vote in the fusion. Internal to the merge: neither reaches the caller.
 #[derive(Debug, Clone)]
 pub(crate) struct Ranked {
     pub finding: Finding,
     pub rank: usize,
+    pub weight: f64,
+}
+
+impl Ranked {
+    /// A provider finding with the default weight.
+    pub(crate) fn provider(finding: Finding, rank: usize) -> Self {
+        Ranked {
+            finding,
+            rank,
+            weight: 1.0,
+        }
+    }
 }
 
 /// A boxed future, so the `Provider` trait stays object-safe without an

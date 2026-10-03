@@ -4,7 +4,8 @@
 use std::time::Duration;
 
 use super::{
-    Config, EngineSettings, FetchSettings, SearchSettings, DEFAULT_ADDR, DEFAULT_TOKEN_ENV,
+    Config, EngineSettings, FetchSettings, IndexSettings, SearchSettings, DEFAULT_ADDR,
+    DEFAULT_TOKEN_ENV,
 };
 
 /// Seconds a provider may take before it is abandoned.
@@ -21,6 +22,16 @@ pub const DEFAULT_MAX_BYTES: u64 = 4 << 20;
 pub const DEFAULT_MAX_REDIRECTS: usize = 5;
 /// Fetches in flight at once.
 pub const DEFAULT_MAX_CONCURRENCY: usize = 8;
+/// The most characters of a page stored in the index.
+pub const DEFAULT_INDEX_TEXT_CHARS: usize = 40_000;
+/// The corpus's size ceiling, in megabytes.
+pub const DEFAULT_INDEX_MAX_SIZE_MB: u64 = 512;
+/// How long a corpus document lives before it is pruned.
+pub const DEFAULT_INDEX_MAX_AGE_DAYS: u64 = 180;
+/// How long a seeded document stays fresh.
+pub const DEFAULT_REFRESH_AFTER_DAYS: u64 = 7;
+/// How much a local hit counts against a borrowed one.
+pub const DEFAULT_INDEX_WEIGHT: f64 = 1.5;
 
 impl Default for Config {
     fn default() -> Self {
@@ -37,6 +48,7 @@ impl Default for Config {
             search: SearchSettings::default(),
             fetch: FetchSettings::default(),
             engines: EngineSettings::default(),
+            index: IndexSettings::default(),
         }
     }
 }
@@ -48,6 +60,8 @@ impl Default for SearchSettings {
             max_provider_time_ms: secs(DEFAULT_PROVIDER_SECS),
             overall_timeout_ms: secs(DEFAULT_OVERALL_SECS),
             cache_ttl_ms: secs(DEFAULT_SEARCH_CACHE_SECS),
+            use_index: None,
+            index_weight: DEFAULT_INDEX_WEIGHT,
         }
     }
 }
@@ -62,6 +76,18 @@ impl Default for FetchSettings {
             allow_private: false,
             index_fetched: None,
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
+            index_text_chars: DEFAULT_INDEX_TEXT_CHARS,
+        }
+    }
+}
+
+impl Default for IndexSettings {
+    fn default() -> Self {
+        IndexSettings {
+            max_size_mb: DEFAULT_INDEX_MAX_SIZE_MB,
+            max_age_days: DEFAULT_INDEX_MAX_AGE_DAYS,
+            refresh_hosts: Vec::new(),
+            refresh_after_days: DEFAULT_REFRESH_AFTER_DAYS,
         }
     }
 }
@@ -113,5 +139,15 @@ pub(super) fn fill(config: &mut Config) {
     }
     if config.fetch.max_concurrency == 0 {
         config.fetch.max_concurrency = fetch_defaults.max_concurrency;
+    }
+    if config.fetch.index_text_chars == 0 {
+        config.fetch.index_text_chars = fetch_defaults.index_text_chars;
+    }
+
+    // IndexSettings: a zero size ceiling or age is a deliberate "no limit", so
+    // `fill` restores only the field a zero cannot express.
+    let index_defaults = IndexSettings::default();
+    if config.index.refresh_after_days == 0 {
+        config.index.refresh_after_days = index_defaults.refresh_after_days;
     }
 }

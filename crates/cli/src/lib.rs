@@ -5,6 +5,7 @@
 pub mod args;
 pub mod http;
 pub mod mcp;
+pub mod render;
 pub mod run;
 pub mod stdio;
 

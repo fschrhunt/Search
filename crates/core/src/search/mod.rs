@@ -26,7 +26,9 @@ pub struct Service {
 impl Service {
     /// Build the service, opening the index under the configured data directory.
     pub fn open(config: Config) -> Result<Self, ServiceError> {
-        let store = Arc::new(Store::open(&config.data_dir).map_err(ServiceError::Store)?);
+        let store = Arc::new(
+            Store::open(&config.data_dir, config.index.clone()).map_err(ServiceError::Store)?,
+        );
         let fetcher = Fetcher::new(config.fetch.clone(), Arc::clone(&store), &config.user_agent);
         let registry = discovery::Registry::new(&config.engines, config.search.clone());
         Ok(Service {
@@ -37,9 +39,31 @@ impl Service {
         })
     }
 
-    /// Discover results across providers.
+    /// Discover results across providers, blended with the local corpus.
+    ///
+    /// The corpus lookup and the provider fan-out run concurrently, so consulting
+    /// the index costs no wall-clock time: whichever finishes first contributes
+    /// what it has. When `use_index` is off, this is the plain fan-out.
     pub async fn search(&self, query: Query) -> Response {
-        self.registry.search(query).await
+        if !self.config.search.should_use_index() {
+            return self.registry.search(query).await;
+        }
+        let result_limit = query.limit.max(self.config.search.max_results_or_default());
+        let local_limit = result_limit;
+        // SQLite is synchronous, so do its bounded FTS lookup on the blocking
+        // pool while provider requests are in flight.
+        let store = Arc::clone(&self.store);
+        let text = query.text.clone();
+        let local_lookup = tokio::task::spawn_blocking(move || store.search(&text, local_limit));
+        let (mut response, local) = tokio::join!(self.registry.search(query), local_lookup);
+        let local = local.ok().and_then(Result::ok).unwrap_or_default();
+        discovery::blend(
+            &mut response,
+            &local,
+            self.config.search.index_weight,
+            result_limit,
+        );
+        response
     }
 
     /// Fetch and index one or more URLs, preserving order.
@@ -54,6 +78,24 @@ impl Service {
         limit: usize,
     ) -> Result<Vec<crate::index::Hit>, StoreError> {
         self.store.search(query, limit)
+    }
+
+    /// Re-fetch the seeded hosts' stale documents, so a corpus a user has chosen
+    /// to keep fresh stays true. Returns how many were refreshed. A no-op when
+    /// no hosts are configured — nothing is fetched but what a caller asks for.
+    pub async fn refresh_seeded(&self) -> usize {
+        let hosts = &self.config.index.refresh_hosts;
+        if hosts.is_empty() {
+            return 0;
+        }
+        let stale = self
+            .store
+            .stale_seeded(hosts, self.config.index.refresh_after());
+        if stale.is_empty() {
+            return 0;
+        }
+        let results = self.fetcher.fetch_many(&stale).await;
+        results.iter().filter(|r| r.error.is_none()).count()
     }
 
     /// The enabled provider names, for status output.

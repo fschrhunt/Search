@@ -13,6 +13,9 @@ pub const DEFAULT_TOKEN_ENV: &str = "SEARCH_TOKEN";
 
 /// Everything the service can be told. Durations are milliseconds in the file,
 /// because a number is what an operator can diff and a comment can explain.
+///
+/// Every optional behaviour is off unless named here, so a default install does
+/// the one thing it promises — search — and nothing else.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -31,6 +34,7 @@ pub struct Config {
     pub search: SearchSettings,
     pub fetch: FetchSettings,
     pub engines: EngineSettings,
+    pub index: IndexSettings,
 }
 
 /// Bounds on one discovery query. Milliseconds on disk; durations in memory.
@@ -48,25 +52,13 @@ pub struct SearchSettings {
     /// How long a query answer is reused.
     #[serde(rename = "cacheTtlMs")]
     pub cache_ttl_ms: u64,
-}
-
-impl SearchSettings {
-    pub fn max_results_or_default(&self) -> usize {
-        if self.max_results == 0 {
-            10
-        } else {
-            self.max_results
-        }
-    }
-    pub fn max_provider_time(&self) -> Duration {
-        Duration::from_millis(self.max_provider_time_ms)
-    }
-    pub fn overall_timeout(&self) -> Duration {
-        Duration::from_millis(self.overall_timeout_ms)
-    }
-    pub fn cache_ttl(&self) -> Duration {
-        Duration::from_millis(self.cache_ttl_ms)
-    }
+    /// Consult the local corpus on every search and blend its hits with the
+    /// borrowed ones. On by default: it is the reason the corpus exists, and it
+    /// only ever adds local results, never removes remote ones.
+    pub use_index: Option<bool>,
+    /// Blend weight for a local hit against a borrowed one. Higher favors what
+    /// you have already read.
+    pub index_weight: f64,
 }
 
 /// Bounds on the fetcher.
@@ -88,6 +80,55 @@ pub struct FetchSettings {
     pub index_fetched: Option<bool>,
     /// How many fetches run at once.
     pub max_concurrency: usize,
+    /// The most characters of a page stored in the index. A page longer than
+    /// this is stored from its opening; the corpus is a finder, not an archive.
+    #[serde(rename = "indexTextChars")]
+    pub index_text_chars: usize,
+}
+
+/// How the private corpus is kept small, fresh, and useful.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IndexSettings {
+    /// The corpus's size ceiling in megabytes. Past it, the least recently
+    /// touched documents are evicted, so a long-lived service cannot grow
+    /// without bound. Zero means no ceiling.
+    #[serde(rename = "maxSizeMb")]
+    pub max_size_mb: u64,
+    /// Documents touched less recently than this are pruned on startup and after
+    /// a write, so stale pages do not linger. Zero disables age pruning.
+    #[serde(rename = "maxAgeDays")]
+    pub max_age_days: u64,
+    /// Hosts the corpus keeps fresh by itself: a search's hits on these hosts are
+    /// re-fetched when older than the freshness window, so a seeded corpus stays
+    /// true. Empty by default — nothing is fetched but what a caller asks for.
+    pub refresh_hosts: Vec<String>,
+    /// A `refresh_hosts` document is considered fresh for this long.
+    #[serde(rename = "refreshAfterDays")]
+    pub refresh_after_days: u64,
+}
+
+impl SearchSettings {
+    pub fn max_results_or_default(&self) -> usize {
+        if self.max_results == 0 {
+            10
+        } else {
+            self.max_results
+        }
+    }
+    pub fn max_provider_time(&self) -> Duration {
+        Duration::from_millis(self.max_provider_time_ms)
+    }
+    pub fn overall_timeout(&self) -> Duration {
+        Duration::from_millis(self.overall_timeout_ms)
+    }
+    pub fn cache_ttl(&self) -> Duration {
+        Duration::from_millis(self.cache_ttl_ms)
+    }
+    /// Whether a search should consult the local corpus (`use_index`, default on).
+    pub fn should_use_index(&self) -> bool {
+        self.use_index.unwrap_or(true)
+    }
 }
 
 impl FetchSettings {
@@ -100,6 +141,32 @@ impl FetchSettings {
     }
     pub fn cache_ttl(&self) -> Duration {
         Duration::from_millis(self.cache_ttl_ms)
+    }
+}
+
+impl IndexSettings {
+    pub fn max_size_bytes(&self) -> u64 {
+        self.max_size_mb.saturating_mul(1024 * 1024)
+    }
+    pub fn max_age(&self) -> Option<Duration> {
+        if self.max_age_days == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(
+                self.max_age_days.saturating_mul(86_400),
+            ))
+        }
+    }
+    pub fn refresh_after(&self) -> Duration {
+        // A zero window would re-fetch on every search; treat it as a day.
+        let days = self.refresh_after_days.max(1);
+        Duration::from_secs(days.saturating_mul(86_400))
+    }
+    /// Whether `host` is one the corpus keeps fresh.
+    pub fn is_refresh_host(&self, host: &str) -> bool {
+        self.refresh_hosts
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(host))
     }
 }
 
