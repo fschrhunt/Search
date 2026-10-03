@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added theme-aware black and white lockup/logo SVGs, and used the lockup at the
+  top of the README.
 - Reframed the README around Search's core promise and clarified getting
   started, adoption, configuration, and security.
 - Search results now blend matches from a bounded local corpus with live
