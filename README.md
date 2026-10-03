@@ -1,11 +1,18 @@
-# Search
+<div align="center">
+  <img src="assets/white/lockup.svg#gh-dark-mode-only" alt="Search" height="52">
+  <img src="assets/black/lockup.svg#gh-light-mode-only" alt="Search" height="52">
 
-**Search the web. Build your own index as you go.**
+  <h3>Search the web. Build your own index as you go.</h3>
 
-Self-hosted web search for people and AI agents. Find pages across independent
-providers, read them cleanly, and keep what you fetch in a private index.
+  <p>Self-hosted web search for people and AI agents.<br>
+  Find pages across independent providers, read them cleanly, and keep what you fetch in a private index.</p>
 
-[Install](docs/install.md) · [Usage](docs/usage.md) · [Configuration](docs/configuration.md)
+  <p>
+    <a href="docs/install.md">Install</a> ·
+    <a href="docs/usage.md">Usage</a> ·
+    <a href="docs/configuration.md">Configuration</a>
+  </p>
+</div>
 
 <br>
 
