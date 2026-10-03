@@ -237,10 +237,11 @@ impl Fetcher {
 
         let mut indexed = None;
         if self.settings.should_index() {
+            let stored = index::cap_chars(&text, self.settings.index_text_chars.max(1));
             let doc = index::Doc {
                 url: final_url.clone(),
                 title: page.title.clone(),
-                text: text.clone(),
+                text: stored,
                 host: index::host_of(&final_url),
                 fetched_at: now_unix(),
             };
@@ -359,7 +360,9 @@ mod tests {
 
     fn fetcher() -> Fetcher {
         let dir = std::env::temp_dir().join(format!("search-fetch-{}", uuid::Uuid::new_v4()));
-        let store = std::sync::Arc::new(Store::open(&dir).expect("store"));
+        let store = std::sync::Arc::new(
+            Store::open(&dir, crate::config::IndexSettings::default()).expect("store"),
+        );
         Fetcher::new(FetchSettings::default(), store, "search-test")
     }
 

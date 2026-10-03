@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Reframed the README around Search's core promise and clarified getting
+  started, adoption, configuration, and security.
+- Search results now blend matches from a bounded local corpus with live
+  providers. Add one-shot `search`, `fetch`, `index`, and `refresh` CLI commands;
+  index use, fetch indexing, corpus age/size limits, and seeded-host refresh are
+  configurable.
 - Extraction keeps the article and drops the cruft: ads, cookie banners,
   related rails, and hidden text are removed, and links and images are
   neutralized so page content cannot exfiltrate. A page that only redirects

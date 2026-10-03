@@ -1,98 +1,132 @@
 # Search
 
-Self-hosted, agent-first web search in one binary. It fans a query out to
-several independent search providers in parallel, merges and reranks the
-results, fetches pages through a hardened reader, and indexes everything it
-reads into a private corpus you can search offline.
+**Search the web. Build your own index as you go.**
 
-Built to run on a personal server and be reached over a private network such as
-a tailnet. There are no accounts, no usage quotas, and no telemetry.
+Self-hosted web search for people and AI agents. Find pages across independent
+providers, read them cleanly, and keep what you fetch in a private index.
 
-## What it is
+[Install](docs/install.md) · [Usage](docs/usage.md) · [Configuration](docs/configuration.md)
 
-- **One static binary.** Rust, no system dependencies, SQLite compiled in.
-- **Keyless by default.** Works out of the box against providers that need no
-  API key.
-- **Clean reads.** Extraction keeps the article and drops ads, banners, related
-  rails, and hidden text, so a model reads prose, not cruft. Links are
-  neutralized so a fetched page cannot carry an exfiltration URL.
-- **Agent-shaped output.** Every search reports, per provider, whether it
-  answered, timed out, or failed, so an empty result is never mistaken for a
-  broken one. `web_fetch` with a query returns only the passages that match.
-- **A private corpus that grows from use.** Every page `fetch` reads is stored
-  and full-text indexed. Repeated reading is instant and independent of any
-  upstream provider.
-- **MCP over stdio and HTTP.** The same two tools — `web_search` and
-  `web_fetch` — for a locally spawned agent or one that reaches it over the
-  network.
+<br>
 
-## Status
+## Find, read, keep
 
-Early. The engine, the fetcher, the index, and both MCP transports work and are
-tested. Packaging and release tooling are next.
+- **Find:** query several independent providers in parallel and merge their
+  results. Keyless providers work out of the box; a failed provider is reported
+  rather than hidden.
+- **Read:** fetch pages through an SSRF-protected reader that strips page
+  clutter. Ask for passages relevant to a query instead of a whole article.
+- **Keep:** fetched pages join a local SQLite full-text index. Search blends
+  local matches with live results, so useful pages remain searchable when
+  providers are unavailable. Size and age limits keep the index bounded.
 
-## Build
+Index search and fetch indexing can each be switched off. Seeded hosts refresh
+only when configured, and only through the explicit refresh command—Search does
+not crawl the web on its own.
+
+## Start
+
+Build from source with Rust:
 
 ```sh
+git clone https://github.com/fschrhunt/search
+cd search
 cargo build --release
 ```
 
-## Run
+Search from your terminal—no server required:
 
 ```sh
-export SEARCH_TOKEN=$(openssl rand -hex 32)
+./target/release/search "rust async runtime"
+./target/release/search fetch https://www.rust-lang.org -query "async"
+./target/release/search index "async runtime" -json
+```
+
+Or start the HTTP API and MCP server:
+
+```sh
+export SEARCH_TOKEN="$(openssl rand -hex 32)"
 ./target/release/search serve
 ```
 
-By default it binds `127.0.0.1:8642`. To expose it on a private interface, set
-`addr` in the config and keep the token set — the service refuses to bind a
-non-loopback address without one.
+HTTP and MCP-over-HTTP require a bearer token, even on loopback. The server
+listens on `127.0.0.1:8642` by default; Search also refuses a non-loopback bind
+without a token. Stdio MCP and one-shot CLI commands do not need one. See
+[installation](docs/install.md) for release and package-manager options.
 
-An agent can also spawn it directly; with no subcommand it serves MCP over
-stdio:
+## Use it with an agent
 
-```json
-{ "mcp": { "servers": { "search": { "command": ["search"] } } } }
-```
-
-## API
-
-All requests carry `Authorization: Bearer $SEARCH_TOKEN`.
-
-```
-GET  /healthz                 liveness
-GET  /v1/status               providers, corpus size, version
-GET  /v1/search?q=...         discover across providers
-GET  /v1/index?q=...          search only what has been fetched already
-POST /v1/fetch {"urls":[...]} read pages into text, and index them
-POST /mcp                     MCP over streamable HTTP
-```
-
-## Configuration
-
-A JSON file at `~/.config/search/search.json` (or `$SEARCH_CONFIG`), and the
-environment variables `SEARCH_ADDR`, `SEARCH_DATA_DIR`, and the token variable
-named by `token_env` (default `SEARCH_TOKEN`). Fields are snake_case; every
-field has a safe default, so a config file names only what it changes.
+With no arguments, `search` serves MCP over stdio. Add it to your MCP client:
 
 ```json
 {
-  "addr": "100.64.0.1:8642",
-  "data_dir": "~/.local/share/search",
-  "engines": { "enabled": ["brave", "wikipedia", "stackexchange"] }
+  "mcp": {
+    "servers": {
+      "search": { "command": ["search"] }
+    }
+  }
 }
+```
+
+The server exposes two tools: `web_search` for discovery and `web_fetch` for
+clean, query-focused reading. For a shared server, use MCP over HTTP instead.
+
+## One engine, more surfaces
+
+| Surface | Use it for |
+| --- | --- |
+| CLI | One-shot search, fetch, and local-index queries |
+| Rust | Use the in-process `search_core::search::Service` |
+| HTTP | Integrate with scripts and services; includes status, search, index, and fetch endpoints |
+| MCP | Give an agent the `web_search` and `web_fetch` tools |
+
+The Rust API is available as a workspace library; it is not yet a published,
+stable third-party crate.
+
+## Make it yours
+
+Settings live in `~/.config/search/search.json` or the file named by
+`SEARCH_CONFIG`. Defaults are useful; turn features off or tune them as needed.
+
+```json
+{
+  "search": { "use_index": true },
+  "fetch": { "index_fetched": true, "index_text_chars": 40000 },
+  "index": {
+    "max_size_mb": 512,
+    "max_age_days": 180,
+    "refresh_hosts": [],
+    "refresh_after_days": 7
+  }
+}
+```
+
+Set `search.use_index` or `fetch.index_fetched` to `false` to disable that
+behavior. Set `max_size_mb` or `max_age_days` to `0` for no limit. See the full
+[configuration reference](docs/configuration.md).
+
+## API
+
+Every HTTP request uses `Authorization: Bearer $SEARCH_TOKEN`.
+
+```text
+GET  /healthz                 liveness
+GET  /v1/status               providers, corpus size, version
+GET  /v1/search?q=...         search providers and local index
+GET  /v1/index?q=...          search only the local index
+POST /v1/fetch {"urls":[...]} fetch pages and optionally index them
+POST /mcp                     MCP over streamable HTTP
 ```
 
 ## Security
 
-The fetcher treats every URL as hostile. It refuses private, loopback,
-link-local and metadata addresses — including the IPv6 forms that embed them —
-re-checks each redirect hop, caps response size, and enforces a deadline. The
-service authenticates every request, the MCP endpoint included, and refuses to
-bind a non-loopback address without a token. It is still meant to sit behind a
-private network: run it on loopback, or on a tailnet interface, not on the open
-internet. See `SECURITY.md`.
+Fetched URLs are untrusted. Search blocks private and metadata-network
+destinations, re-checks redirects, limits response size, and enforces deadlines.
+Keep a network-facing instance on a private network, behind authentication; do
+not expose it to the public internet. Read the [security notes](docs/security.md)
+before deployment.
 
-## License
+## Project
 
-MIT
+Search is early software. See the [docs](docs/README.md), [changelog](CHANGELOG.md),
+and [contributing guide](CONTRIBUTING.md). Licensed under MIT.

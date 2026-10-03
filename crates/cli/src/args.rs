@@ -1,10 +1,16 @@
 //! The command line: what `search` accepts and how it dispatches.
+//!
+//! The verbs are the four surfaces the project offers. `search QUERY` is the
+//! human and script surface; `serve` is the HTTP and MCP surface; a bare
+//! `search` with no query is the stdio MCP surface a harness spawns. Keeping
+//! "no arguments" as MCP means an existing harness keeps working while a person
+//! gets a real search command.
 
-/// One parsed command. The absence of a subcommand means "serve MCP over
-/// stdio", which is what a harness spawns.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One parsed command.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    /// Serve MCP over stdio (the default, and what a harness invokes).
+    /// Serve MCP over stdio (the default with no arguments, and what a harness
+    /// invokes).
     Stdio { config: Option<String> },
     /// Serve the JSON API and MCP over HTTP.
     Serve {
@@ -12,18 +18,50 @@ pub enum Command {
         addr: Option<String>,
         data_dir: Option<String>,
     },
+    /// Search the web, printing results for a person or JSON for a script.
+    Search {
+        query: String,
+        limit: usize,
+        json: bool,
+        providers: Vec<String>,
+        config: Option<String>,
+    },
+    /// Read one or more URLs.
+    Fetch {
+        urls: Vec<String>,
+        query: Option<String>,
+        max_characters: Option<usize>,
+        json: bool,
+        config: Option<String>,
+    },
+    /// Search only the local corpus.
+    Index {
+        query: String,
+        limit: usize,
+        json: bool,
+        config: Option<String>,
+    },
+    /// Refresh stale documents on configured index hosts.
+    Refresh { config: Option<String> },
     /// Print the version.
     Version,
     /// Print usage.
     Help,
 }
 
-/// Parse arguments. An unknown first token that is not a flag is an error,
-/// so a typo fails loudly rather than silently serving.
+/// Parse arguments. An unknown first token that is not a flag is treated as a
+/// search query, so `search "rust async"` works; only a recognized verb takes a
+/// subcommand's flags.
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String> {
     let mut args = args.into_iter().peekable();
-    let first = args.peek().cloned();
-    match first.as_deref() {
+    match args.peek().map(String::as_str) {
+        None => Ok(Command::Stdio { config: None }),
+        Some("stdio") => {
+            let _ = args.next();
+            Ok(Command::Stdio {
+                config: parse_config_flag(args)?,
+            })
+        }
         Some("serve") => {
             let _ = args.next();
             let flags = parse_serve_flags(args)?;
@@ -33,9 +71,17 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
                 data_dir: flags.data_dir,
             })
         }
-        Some("stdio") => {
+        Some("fetch") => {
             let _ = args.next();
-            Ok(Command::Stdio {
+            parse_fetch(args)
+        }
+        Some("index") => {
+            let _ = args.next();
+            parse_index(args)
+        }
+        Some("refresh") => {
+            let _ = args.next();
+            Ok(Command::Refresh {
                 config: parse_config_flag(args)?,
             })
         }
@@ -43,28 +89,44 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
         Some("help") | Some("--help") | Some("-h") => Ok(Command::Help),
         // Flags with no subcommand: default to stdio so harness configs that
         // pass `-config` still work.
-        Some(flag) if flag.starts_with('-') => Ok(Command::Stdio {
+        Some("-config") | Some("--config") => Ok(Command::Stdio {
             config: parse_config_flag(args)?,
         }),
-        Some(other) => Err(format!("unknown command {other:?}")),
-        None => Ok(Command::Stdio { config: None }),
+        Some(flag) if flag.starts_with('-') && flag != "--" => parse_search(args),
+        // Anything else is a search query.
+        Some(_) => parse_search(args),
     }
 }
 
 /// The usage text.
 pub fn usage() -> &'static str {
-    "search — self-hosted, agent-first web search
+    "search — a self-hosted web search engine
 
 Usage:
-  search                 serve MCP over stdio (what an agent spawns)
-  search stdio [flags]   the same, explicit
-  search serve [flags]   serve the JSON API and MCP over HTTP
-  search version         print the version
+  search QUERY [flags]         search the web and print results
+  search fetch URL... [flags]  read pages as clean text
+  search index QUERY [flags]   search only the local corpus
+  search refresh [flags]       refresh stale configured index hosts
+  search serve [flags]         serve the JSON API and MCP over HTTP
+  search                       serve MCP over stdio (what an agent spawns)
+  search version               print the version
 
-Serve flags:
+Search flags:
+  -limit N       results to return (default 10)
+  -json          print JSON instead of text
+  -providers A,B restrict to these providers
   -config PATH   JSON config (default $SEARCH_CONFIG or ~/.config/search/search.json)
-  -addr ADDR     listen address (default 127.0.0.1:8642)
-  -data DIR      data directory for the index"
+
+Fetch flags:
+  -query TEXT        return only the passages matching TEXT
+  -max-chars N       cap the characters returned per page
+  -json              print JSON instead of text
+  -config PATH       JSON config
+
+Index flags:
+  -limit N       results to return (default 10)
+  -json          print JSON instead of text
+  -config PATH   JSON config"
 }
 
 fn parse_config_flag<I: IntoIterator<Item = String>>(args: I) -> Result<Option<String>, String> {
@@ -79,6 +141,122 @@ fn parse_config_flag<I: IntoIterator<Item = String>>(args: I) -> Result<Option<S
         }
     }
     Ok(config)
+}
+
+fn parse_search<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String> {
+    let mut query_words = Vec::new();
+    let mut limit = 10usize;
+    let mut json = false;
+    let mut providers = Vec::new();
+    let mut config = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-limit" | "--limit" => {
+                limit = args
+                    .next()
+                    .ok_or("missing value for -limit")?
+                    .parse()
+                    .map_err(|_| "-limit needs a number".to_string())?;
+            }
+            "-json" | "--json" => json = true,
+            "-providers" | "--providers" => {
+                let value = args.next().ok_or("missing value for -providers")?;
+                providers = value
+                    .split(',')
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect();
+            }
+            "-config" | "--config" => {
+                config = Some(args.next().ok_or("missing value for -config")?)
+            }
+            other if other.starts_with('-') => return Err(format!("unknown flag {other:?}")),
+            word => query_words.push(word.to_string()),
+        }
+    }
+    if query_words.is_empty() {
+        return Err("a search needs a query".into());
+    }
+    Ok(Command::Search {
+        query: query_words.join(" "),
+        limit,
+        json,
+        providers,
+        config,
+    })
+}
+
+fn parse_index<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String> {
+    let mut query_words = Vec::new();
+    let mut limit = 10usize;
+    let mut json = false;
+    let mut config = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-limit" | "--limit" => {
+                limit = args
+                    .next()
+                    .ok_or("missing value for -limit")?
+                    .parse()
+                    .map_err(|_| "-limit needs a number".to_string())?;
+            }
+            "-json" | "--json" => json = true,
+            "-config" | "--config" => {
+                config = Some(args.next().ok_or("missing value for -config")?)
+            }
+            other if other.starts_with('-') => return Err(format!("unknown flag {other:?}")),
+            word => query_words.push(word.to_string()),
+        }
+    }
+    if query_words.is_empty() {
+        return Err("an index search needs a query".into());
+    }
+    Ok(Command::Index {
+        query: query_words.join(" "),
+        limit,
+        json,
+        config,
+    })
+}
+
+fn parse_fetch<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String> {
+    let mut urls = Vec::new();
+    let mut query = None;
+    let mut max_characters = None;
+    let mut json = false;
+    let mut config = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-query" | "--query" => query = Some(args.next().ok_or("missing value for -query")?),
+            "-max-chars" | "--max-chars" => {
+                max_characters = Some(
+                    args.next()
+                        .ok_or("missing value for -max-chars")?
+                        .parse()
+                        .map_err(|_| "-max-chars needs a number".to_string())?,
+                );
+            }
+            "-json" | "--json" => json = true,
+            "-config" | "--config" => {
+                config = Some(args.next().ok_or("missing value for -config")?)
+            }
+            other if other.starts_with('-') => return Err(format!("unknown flag {other:?}")),
+            url => urls.push(url.to_string()),
+        }
+    }
+    if urls.is_empty() {
+        return Err("fetch needs at least one URL".into());
+    }
+    Ok(Command::Fetch {
+        urls,
+        query,
+        max_characters,
+        json,
+        config,
+    })
 }
 
 fn parse_serve_flags<I: IntoIterator<Item = String>>(args: I) -> Result<ServeFlags, String> {
@@ -121,6 +299,20 @@ mod tests {
     }
 
     #[test]
+    fn a_query_is_a_search() {
+        assert_eq!(
+            parse(args(&["rust", "async", "-limit", "5"])).unwrap(),
+            Command::Search {
+                query: "rust async".into(),
+                limit: 5,
+                json: false,
+                providers: vec![],
+                config: None,
+            }
+        );
+    }
+
+    #[test]
     fn serve_reads_its_flags() {
         assert_eq!(
             parse(args(&["serve", "-addr", "0.0.0.0:1", "-data", "/tmp/x"])).unwrap(),
@@ -128,6 +320,20 @@ mod tests {
                 config: None,
                 addr: Some("0.0.0.0:1".into()),
                 data_dir: Some("/tmp/x".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn fetch_takes_urls_and_a_focus() {
+        assert_eq!(
+            parse(args(&["fetch", "https://a.example", "-query", "x y"])).unwrap(),
+            Command::Fetch {
+                urls: vec!["https://a.example".into()],
+                query: Some("x y".into()),
+                max_characters: None,
+                json: false,
+                config: None,
             }
         );
     }
@@ -143,7 +349,28 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_command_is_an_error() {
-        assert!(parse(args(&["serve-me"])).is_err());
+    fn a_search_without_words_is_an_error() {
+        // A recognized verb with flags but no query is a mistake.
+        assert!(parse(args(&["fetch"])).is_err());
+        // A bare query word is a search.
+        assert!(matches!(
+            parse(args(&["hello"])).unwrap(),
+            Command::Search { .. }
+        ));
+    }
+
+    #[test]
+    fn fetch_without_urls_is_an_error() {
+        assert!(parse(args(&["fetch"])).is_err());
+    }
+
+    #[test]
+    fn refresh_accepts_config_path() {
+        assert_eq!(
+            parse(args(&["refresh", "-config", "x.json"])).unwrap(),
+            Command::Refresh {
+                config: Some("x.json".into())
+            }
+        );
     }
 }

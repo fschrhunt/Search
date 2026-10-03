@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "The search engine: multi-provider discovery, a hardened fetcher, a private index, and the MCP surface"
+description = "Self-hosted search engine: provider discovery, clean page reading, and a private full-text index"
 publish = false
 
 [dependencies]

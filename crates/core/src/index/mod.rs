@@ -13,6 +13,8 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 
+use crate::config::IndexSettings;
+
 pub use schema::Stats;
 
 /// A stored page.
@@ -67,13 +69,13 @@ impl From<rusqlite::Error> for StoreError {
 pub struct Store {
     connection: Mutex<Connection>,
     path: PathBuf,
+    settings: IndexSettings,
 }
 
 impl Store {
-    /// Open the store under `dir`, creating the directory and schema. A second
-    /// process cannot open the same file for writing; SQLite serializes and
-    /// reports rather than corrupting.
-    pub fn open(dir: &Path) -> Result<Self, StoreError> {
+    /// Open the store under `dir`, creating the directory and schema, and apply
+    /// the corpus's hygiene: prune what has aged out before serving.
+    pub fn open(dir: &Path, settings: IndexSettings) -> Result<Self, StoreError> {
         std::fs::create_dir_all(dir)
             .map_err(|e| StoreError(format!("create data dir {}: {e}", dir.display())))?;
         let path = dir.join("search.db");
@@ -84,10 +86,14 @@ impl Store {
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "busy_timeout", 5000)?;
         schema::apply(&connection)?;
-        Ok(Store {
+        let store = Store {
             connection: Mutex::new(connection),
             path,
-        })
+            settings,
+        };
+        // Startup is the natural moment to age the corpus out.
+        store.prune()?;
+        Ok(store)
     }
 
     /// The database file path, for status output.
@@ -95,7 +101,8 @@ impl Store {
         &self.path
     }
 
-    /// Upsert one document.
+    /// Upsert one document. The caller has already capped its text; the store
+    /// prunes after a write so it cannot grow past its ceiling.
     pub fn put(&self, doc: &Doc) -> Result<(), StoreError> {
         let connection = self.lock();
         connection.execute(
@@ -108,7 +115,46 @@ impl Store {
                  fetched_at = excluded.fetched_at",
             rusqlite::params![doc.url, doc.title, doc.text, doc.host, doc.fetched_at],
         )?;
+        drop(connection);
+        self.prune()?;
         Ok(())
+    }
+
+    /// Keep the corpus within its age and size bounds: drop documents older than
+    /// the maximum age, then evict the least recently touched until the stored
+    /// text fits the byte ceiling. Both bounds default on, so a long-lived
+    /// service cannot grow without limit.
+    pub fn prune(&self) -> Result<(), StoreError> {
+        let connection = self.lock();
+        if let Some(max_age) = self.settings.max_age() {
+            let cutoff = now_secs().saturating_sub(max_age.as_secs().min(i64::MAX as u64) as i64);
+            connection.execute("DELETE FROM pages WHERE fetched_at < ?1", [cutoff])?;
+        }
+        let ceiling = self.settings.max_size_bytes();
+        if ceiling == 0 {
+            return Ok(());
+        }
+        // Evict oldest-first until the stored bytes fit. Each pass asks SQLite
+        // for the current total, so the loop terminates exactly at the ceiling.
+        loop {
+            let bytes: i64 = connection.query_row(
+                "SELECT coalesce(sum(length(CAST(text AS BLOB))), 0) FROM pages",
+                [],
+                |row| row.get(0),
+            )?;
+            if bytes < 0 || bytes as u64 <= ceiling {
+                return Ok(());
+            }
+            let removed = connection.execute(
+                "DELETE FROM pages WHERE url = (
+                    SELECT url FROM pages ORDER BY fetched_at ASC LIMIT 1
+                )",
+                [],
+            )?;
+            if removed == 0 {
+                return Ok(());
+            }
+        }
     }
 
     /// Full-text search over the corpus, ranked by BM25 (higher score first).
@@ -156,20 +202,20 @@ impl Store {
         let connection = self.lock();
         let (documents, hosts, bytes, oldest, newest): (i64, i64, i64, i64, i64) = connection
             .query_row(
-                "SELECT count(*), count(DISTINCT host), coalesce(sum(length(text)), 0),
+            "SELECT count(*), count(DISTINCT host), coalesce(sum(length(CAST(text AS BLOB))), 0),
                         coalesce(min(fetched_at), 0), coalesce(max(fetched_at), 0)
                  FROM pages",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )?;
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
         Ok(Stats {
             documents: documents.max(0) as usize,
             hosts: hosts.max(0) as usize,
@@ -179,6 +225,40 @@ impl Store {
         })
     }
 
+    /// Documents on the seeded refresh hosts older than the freshness window,
+    /// newest-first, so a caller can re-fetch them to keep the corpus true.
+    pub fn stale_seeded(&self, hosts: &[String], fresh_for: std::time::Duration) -> Vec<String> {
+        if hosts.is_empty() {
+            return Vec::new();
+        }
+        let cutoff = now_secs() - fresh_for.as_secs() as i64;
+        let connection = self.lock();
+        let placeholders = (1..=hosts.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tail = hosts.len() + 1;
+        let sql = format!(
+            "SELECT url FROM pages
+             WHERE host IN ({placeholders}) AND fetched_at < ?{tail}
+             ORDER BY fetched_at ASC LIMIT 50"
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = hosts
+            .iter()
+            .map(|h| Box::new(h.clone()) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        params.push(Box::new(cutoff));
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let Ok(mut statement) = connection.prepare(&sql) else {
+            return Vec::new();
+        };
+        let rows = statement.query_map(refs.as_slice(), |row| row.get::<_, String>(0));
+        match rows {
+            Ok(rows) => rows.filter_map(Result::ok).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Lock the connection, recovering from a poisoned mutex: a panic in one
     /// handler must not wedge the store for every later request.
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -186,11 +266,9 @@ impl Store {
     }
 }
 
-/// A short snippet around the first query term found in `text`. Falls back to
-/// the document's opening when no term is found verbatim.
 /// The passage of `text` that best matches `query`, or the opening when the
-/// query matches nothing. Reuses the fetcher's passage scorer so the index and
-/// the tool agree on what "the relevant part" means.
+/// query matches nothing. Reuses the shared passage scorer so the index and the
+/// tool agree on what "the relevant part" means.
 fn snippet(text: &str, query: &str) -> String {
     const WINDOW: usize = 240;
     let passages = crate::text::select(text, query, WINDOW);
@@ -213,13 +291,33 @@ pub fn host_of(url: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Cap text at `chars` characters on a character boundary. The corpus stores a
+/// finder's worth of a page, not the whole of it.
+pub fn cap_chars(text: &str, chars: usize) -> String {
+    if text.chars().count() <= chars {
+        return text.to_string();
+    }
+    text.chars().take(chars).collect()
+}
+
+/// The current Unix time in seconds.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn store() -> Store {
-        Store::open(&std::env::temp_dir().join(format!("search-test-{}", uuid::Uuid::new_v4())))
-            .expect("open store")
+        Store::open(
+            &std::env::temp_dir().join(format!("search-test-{}", uuid::Uuid::new_v4())),
+            crate::config::IndexSettings::default(),
+        )
+        .expect("open store")
     }
 
     #[test]
@@ -231,7 +329,7 @@ mod tests {
                 title: "Unique Title".into(),
                 text: "a distinctive phrase about widgets".into(),
                 host: "example.com".into(),
-                fetched_at: 1,
+                fetched_at: now_secs(),
             })
             .unwrap();
         let hits = store.search("distinctive widgets", 5).unwrap();
@@ -248,7 +346,7 @@ mod tests {
                 title: "T".into(),
                 text: "body".into(),
                 host: "example.com".into(),
-                fetched_at: 1,
+                fetched_at: now_secs(),
             })
             .unwrap();
         assert!(store.search("a: b* OR", 5).is_ok());
@@ -267,12 +365,78 @@ mod tests {
                     title: "t".into(),
                     text: "body".into(),
                     host: host.into(),
-                    fetched_at: 1,
+                    fetched_at: now_secs(),
                 })
                 .unwrap();
         }
         let stats = store.stats().unwrap();
         assert_eq!(stats.documents, 2);
         assert_eq!(stats.hosts, 2);
+    }
+
+    /// A document older than the age bound is pruned, so the corpus cannot
+    /// accumulate stale pages forever.
+    #[test]
+    fn aged_documents_are_pruned() {
+        let dir = std::env::temp_dir().join(format!("search-age-{}", uuid::Uuid::new_v4()));
+        let settings = crate::config::IndexSettings {
+            max_age_days: 1,
+            ..Default::default()
+        };
+        let store = Store::open(&dir, settings).expect("open");
+        store
+            .put(&Doc {
+                url: "https://old.example/p".into(),
+                title: "old".into(),
+                text: "stale content".into(),
+                host: "old.example".into(),
+                fetched_at: now_secs() - 3 * 86_400,
+            })
+            .unwrap();
+        assert_eq!(store.stats().unwrap().documents, 0, "old doc pruned");
+    }
+
+    /// The corpus stays under its byte ceiling by evicting the oldest first.
+    #[test]
+    fn the_byte_ceiling_evicts_oldest_first() {
+        let dir = std::env::temp_dir().join(format!("search-size-{}", uuid::Uuid::new_v4()));
+        let settings = crate::config::IndexSettings {
+            max_size_mb: 1,
+            max_age_days: 0,
+            refresh_hosts: Vec::new(),
+            refresh_after_days: 7,
+        };
+        let store = Store::open(&dir, settings).expect("open");
+        // Two documents, each about 0.6 MB of text, exceed the 1 MB ceiling.
+        for i in 0..2 {
+            store
+                .put(&Doc {
+                    url: format!("https://e.example/{i}"),
+                    title: "t".into(),
+                    text: format!(
+                        "{} {}",
+                        "filler ".repeat(90_000),
+                        if i == 1 { "newer" } else { "older" }
+                    ),
+                    host: "e.example".into(),
+                    fetched_at: now_secs() + i,
+                })
+                .unwrap();
+        }
+        let stats = store.stats().unwrap();
+        assert!(stats.bytes <= 1024 * 1024, "over ceiling: {}", stats.bytes);
+        // The newer document survives; the older is evicted.
+        assert_eq!(stats.documents, 1);
+        assert_eq!(store.search("newer", 5).unwrap().len(), 1);
+        assert!(store.search("older", 5).unwrap().is_empty());
+    }
+
+    /// Text longer than the cap is stored from its opening only.
+    #[test]
+    fn stored_text_is_capped() {
+        assert_eq!(cap_chars("abcdef", 3), "abc");
+        assert_eq!(cap_chars("ab", 10), "ab");
+        // On a character boundary, not a byte one.
+        assert_eq!(cap_chars("héllo", 2), "hé");
     }
 }
