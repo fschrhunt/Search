@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use search_core::search::{self, Service};
+use search::Search;
+use search_mcp::serve_stdio;
 
 use crate::run::build_service;
 
@@ -15,7 +16,7 @@ pub async fn serve(config_path: Option<String>) -> i32 {
             return 1;
         }
     };
-    match search::serve_stdio(service).await {
+    match serve_stdio(service).await {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("search: stdio: {error}");
@@ -26,6 +27,6 @@ pub async fn serve(config_path: Option<String>) -> i32 {
 
 /// Kept so the binary and tests share one construction path.
 #[allow(dead_code)]
-pub(crate) fn service_for_test(config_path: Option<String>) -> Result<Arc<Service>, String> {
+pub(crate) fn service_for_test(config_path: Option<String>) -> Result<Arc<Search>, String> {
     build_service(config_path, None, None)
 }

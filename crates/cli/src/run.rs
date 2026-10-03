@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use search_core::config;
-use search_core::search::Service;
+use search::config;
+use search::Search;
 
 use crate::{args::Command, http, stdio};
 
@@ -11,7 +11,7 @@ use crate::{args::Command, http, stdio};
 pub async fn execute(command: Command) -> i32 {
     match command {
         Command::Version => {
-            println!("{}", search_core::VERSION);
+            println!("{}", search::VERSION);
             0
         }
         Command::Help => {
@@ -59,7 +59,7 @@ async fn search_command(
         Ok(service) => service,
         Err(error) => return report_error(error),
     };
-    let mut request = search_core::discovery::Query {
+    let mut request = search::discovery::Query {
         text: query,
         ..Default::default()
     };
@@ -89,12 +89,11 @@ async fn fetch_command(
     let mut results = service.fetch(&urls).await;
     for result in &mut results {
         if let Some(focus) = query.as_deref() {
-            result.text =
-                search_core::text::select(&result.text, focus, max_characters.unwrap_or(4000))
-                    .into_iter()
-                    .map(|passage| passage.text)
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
+            result.text = search::text::select(&result.text, focus, max_characters.unwrap_or(4000))
+                .into_iter()
+                .map(|passage| passage.text)
+                .collect::<Vec<_>>()
+                .join("\n\n");
         } else if let Some(max) = max_characters {
             result.text = result.text.chars().take(max).collect();
         }
@@ -149,7 +148,7 @@ pub(super) fn build_service(
     config_path: Option<String>,
     addr: Option<String>,
     data_dir: Option<String>,
-) -> Result<Arc<Service>, String> {
+) -> Result<Arc<Search>, String> {
     let path = config_path.map(std::path::PathBuf::from);
     let mut settings = config::load(path).map_err(|e| e.message().to_string())?;
     if let Some(addr) = addr {
@@ -161,6 +160,6 @@ pub(super) fn build_service(
     // Overrides bypassed validation at load time, so re-check the effective
     // settings before binding.
     settings.validate().map_err(|e| e.message().to_string())?;
-    let service = Service::open(settings).map_err(|e| e.to_string())?;
+    let service = Search::open(settings).map_err(|e| e.to_string())?;
     Ok(Arc::new(service))
 }

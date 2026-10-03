@@ -1,6 +1,6 @@
 //! The `search` entry point: parse the command line and run it.
 
-use search::args::{self, Command};
+use search_cli::args::{self, Command};
 
 #[tokio::main]
 async fn main() {
@@ -12,7 +12,7 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let code = search::run::execute(command).await;
+    let code = search_cli::run::execute(command).await;
     std::process::exit(code);
 }
 

@@ -20,11 +20,11 @@ warnings`, the workspace tests, a syntax check of every shell script, and
 
 ## Where things live
 
-Every Rust crate is a folder under `crates/`. `cli` depends on `core` and never
-the reverse. `core` names no terminal and no listener; it is the engine.
+Every Rust crate is a folder under `crates/`. `cli` and `mcp` depend on the
+`search` engine; the engine depends on neither frontend nor protocol.
 
 ```
-crates/core/  the engine (`search_core`)
+crates/search/  the engine library (`search`)
   config/       the settings surface: settings.rs (the shape and its invariants),
                 defaults.rs (built-in values, applied after deserialize),
                 load.rs (read, merge, validate). A token on a non-loopback bind
@@ -42,14 +42,14 @@ crates/core/  the engine (`search_core`)
                 cache.rs (recent answers)
   index/        the private corpus: mod.rs (Store over rusqlite, FTS search),
                 schema.rs (the tables, triggers, and the FTS query builder)
-  search/       the MCP surface: mod.rs (Service, the in-process facade),
-                tools.rs (web_search and web_fetch handlers, stdio transport)
-crates/cli/   the `search` binary
+  service.rs    the in-process `Search` engine and its public operations
+crates/mcp/   the optional MCP adapter (`search_mcp`)
+  lib.rs        the `web_search` and `web_fetch` tools, stdio transport
+  http.rs       the streamable HTTP MCP transport
+crates/cli/   the `cli` package and `search` binary (`search_cli` library)
   args.rs       parse the command line
   run.rs        dispatch, and build the service with serve overrides
-  stdio.rs      the stdio MCP transport
   http.rs       the JSON API and auth middleware
-  mcp.rs        the streamable HTTP MCP transport
 scripts/guard.sh  the security-surface audit: allowed hosts, panic-site policy,
                   the SSRF guard's presence, and the auth layer
 scripts/release.sh · scripts/formula.sh · install.sh  the release path; the
@@ -60,14 +60,13 @@ x             the one repository entry point
 
 ## Conventions
 
-- **Shipped code denies explicit panic sites.** `crates/core/src/lib.rs` denies
+- **Shipped code denies explicit panic sites.** `crates/search/src/lib.rs` denies
   `clippy::unwrap_used`, `expect_used`, `panic`, `unreachable`, and
   `indexing_slicing`. Every allowed site carries a `proof:` comment or a scoped
   `#[allow]` explaining why runtime input cannot reach it. `scripts/guard.sh`
   enforces the same rule.
-- **One facade, two surfaces.** `search::Service` is what both the MCP tools and
-  the JSON API call. A change to search, fetch, or the index lands in the facade
-  once and reaches both frontends.
+- **The engine is protocol-free.** `search::Search` is the public in-process
+  engine. The MCP adapter and CLI depend on it; it does not depend on either.
 - **The security-critical file is `fetch/guard.rs`.** A URL is model-chosen, so
   every class of address that can reach infrastructure must be classified
   private, and `check_host` strips IPv6 brackets before parsing an address. The
@@ -81,5 +80,5 @@ x             the one repository entry point
 - **Comment modules and functions with their purpose and contract.** Avoid
   line-by-line comments. Update a comment when the behavior it describes changes.
 - **One concern per PR.** The branch is `<type>/<slug>`; the title is
-  conventional (`fix(core): ...`), because it becomes the squash commit on main.
+  conventional (`fix(search): ...`), because it becomes the squash commit on main.
 - Anything user-visible gets a `CHANGELOG.md` entry under `Unreleased`.

@@ -1,12 +1,12 @@
 [package]
-name = "search-core"
+name = "search"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Self-hosted search engine: provider discovery, clean page reading, and a private full-text index"
+description = "Self-hosted web search with a private, growing full-text index"
 publish = false
 
 [dependencies]
@@ -21,7 +21,6 @@ regex.workspace = true
 uuid.workspace = true
 percent-encoding.workspace = true
 sha2.workspace = true
-rmcp.workspace = true
 dom_smoothie.workspace = true
 dom_query.workspace = true
 

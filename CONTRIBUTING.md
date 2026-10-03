@@ -37,18 +37,18 @@ can see it. Never work around it.
 
 ## Where things go
 
-The file map and the conventions are in `AGENTS.md`. In short: `crates/core` is
-the engine and names no terminal or listener; `crates/cli` is the binary and
-depends on core, never the reverse. `search::Service` is the one facade both the
-MCP tools and the JSON API call, so a change lands once.
+The file map and the conventions are in `AGENTS.md`. In short: `crates/search`
+is the engine library and names no terminal, listener, or protocol. The `cli`
+and `mcp` packages depend on it, not the reverse. `search::Search` is the
+in-process API used by both adapters.
 
 ## Branches, commits and pull requests
 
 - Before the first push, name the branch `<type>/<slug>`, for example
   `fix/rebinding-guard` or `feat/owned-index`. Never push `main` directly.
-- Conventional commit titles, plain language: `fix(fetch): close the DNS
+- Conventional commit titles, plain language: `fix(search): close the DNS
   rebinding gap`. The type is `feat`, `fix`, `perf`, `refactor`, `docs`, `test`,
-  or `chore`; the scope is `core`, `cli`, `infra`, or `docs`.
+  or `chore`; the scope is `search`, `cli`, `mcp`, `infra`, or `docs`.
 - The title becomes the squash commit on `main`; write it as the one line someone
   reads in `git log`.
 - Use the pull request template. Explain the problem, what changed, and why it

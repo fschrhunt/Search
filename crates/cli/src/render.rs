@@ -1,6 +1,6 @@
 //! Render engine responses as compact terminal text or machine-readable JSON.
 
-use search_core::{discovery::Response, fetch::Fetched, index::Hit};
+use search::{discovery::Response, fetch::Fetched, index::Hit};
 
 /// Print any serializable response as JSON; return a process-style status.
 pub fn json<T: serde::Serialize>(value: &T) -> i32 {

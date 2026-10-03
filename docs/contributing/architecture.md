@@ -1,12 +1,12 @@
 # Architecture
 
-search is a Cargo workspace with two crates. `crates/core` is the engine: it
-names no terminal and no listener. `crates/cli` is the `search` binary: it puts
-the engine behind a command line and a listener. `cli` depends on `core`, never
-the reverse.
+Search is a Cargo workspace with three packages. `crates/search` is the engine
+library and has no terminal, listener, or protocol dependency. `crates/cli` is
+the `search` executable and HTTP API. `crates/mcp` is the optional MCP adapter.
+Both adapters depend on `search`; the engine depends on neither.
 
 ```
-crates/core/  the engine (`search_core`)
+crates/search/  the engine (`search`)
   config/       the settings surface: settings.rs (the shape), defaults.rs
                 (built-in values), load.rs (read, merge, validate)
   discovery/    the provider fan-out: mod.rs (Finding, Query, Response, the
@@ -18,26 +18,26 @@ crates/core/  the engine (`search_core`)
                 cache.rs (recent answers)
   index/        mod.rs (Store over SQLite), schema.rs (tables, triggers, the FTS
                 query builder)
-  search/       mod.rs (Service, the facade), tools.rs (the MCP handlers)
-crates/cli/   the binary
+  service.rs    the public `Search` engine and its operations
+crates/mcp/   the MCP tools and transports (`search_mcp`)
+  lib.rs        tool definitions and stdio transport
+  http.rs       streamable HTTP transport
+crates/cli/   the command and HTTP API package (`cli`; binary `search`)
   args.rs       the command line
   run.rs        dispatch, and build the service with overrides
-  stdio.rs      the stdio MCP transport
   http.rs       the JSON API, the router, and the auth middleware
-  mcp.rs        the streamable HTTP MCP transport
 ```
 
 ## The rules
 
-- **One facade.** `search::Service` is what both the MCP tools and the JSON API
-  call. A change to search, fetch, or the index lands in the facade once and
-  reaches both frontends.
+- **The engine stays independent.** `search::Search` is the in-process API.
+  The CLI and MCP adapter depend on it; the engine does not depend on either.
 - **The security-critical file is `fetch/guard.rs`.** Every class of address that
   can reach infrastructure must be classified private there, and
   `check_host` strips IPv6 brackets before parsing. Its tests carry the
   counterexamples; do not loosen them. `scripts/guard.sh` fails the build if the
   guard or its call sites move.
-- **Shipped code denies panic sites.** `crates/core/src/lib.rs` denies
+- **Shipped code denies panic sites.** `crates/search/src/lib.rs` denies
   `clippy::unwrap_used`, `expect_used`, `panic`, `unreachable`, and
   `indexing_slicing`. Every allowed site carries a `proof:` comment or a scoped
   `#[allow]` explaining why runtime input cannot reach it.

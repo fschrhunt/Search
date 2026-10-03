@@ -1,17 +1,17 @@
 [package]
-# The command and Rust library share the product name.
-name = "search"
+# The package is `cli`; it exports `search_cli` and installs the `search` binary.
+name = "cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Self-hosted web search with clean page reading and a private, growing index"
+description = "Command-line interface and HTTP server for Search"
 publish = false
 
 [lib]
-name = "search"
+name = "search_cli"
 path = "src/lib.rs"
 
 [[bin]]
@@ -19,12 +19,12 @@ name = "search"
 path = "src/main.rs"
 
 [dependencies]
-search-core.workspace = true
+search.workspace = true
+search_mcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal", "io-std", "net"] }
 axum.workspace = true
-rmcp.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
